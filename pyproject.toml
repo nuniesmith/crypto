@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=68"]
-build-backend = "setuptools.build_backend"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "crypto-scalper"
@@ -16,6 +16,7 @@ dependencies = [
     "optuna>=3.6",
     "requests>=2.31",
     "python-dateutil>=2.8",
+    "pyarrow>=14.0",
 ]
 
 [project.optional-dependencies]
@@ -25,7 +26,7 @@ dev = [
     "black>=24.0",
 ]
 live = [
-    "ccxt>=4.0",          # optional live / paper via Kraken
+    "ccxt>=4.0",
 ]
 
 [project.scripts]

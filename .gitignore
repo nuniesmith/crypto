@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+data/
+*.db
+*.sqlite
+.env
+.DS_Store
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+optuna_studies/
+*.log

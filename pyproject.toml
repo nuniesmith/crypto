@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_backend"
+
+[project]
+name = "crypto-scalper"
+version = "0.1.0"
+description = "1-minute spot BTC/ETH/SOL scalper for Kraken — VWAP+EMA strategies, fee-aware backtest & Optuna"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MPL-2.0" }
+authors = [{ name = "nuniesmith" }]
+dependencies = [
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "optuna>=3.6",
+    "requests>=2.31",
+    "python-dateutil>=2.8",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+    "black>=24.0",
+]
+live = [
+    "ccxt>=4.0",          # optional live / paper via Kraken
+]
+
+[project.scripts]
+crypto = "crypto.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

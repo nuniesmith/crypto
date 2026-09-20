@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import sys
-from pathlib import Path
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -33,7 +32,7 @@ def main(argv: list[str] | None = None) -> int:
         "--fee-tier",
         type=int,
         default=1,
-        help="Kraken fee tier 1–12 (affects maker/taker %)",
+        help="Kraken fee tier 1-12 (affects maker/taker %%)",
     )
     p_res.add_argument("--strategy", default="vwap_mr", choices=["vwap_mr", "ema_cross"])
 
@@ -46,7 +45,7 @@ def main(argv: list[str] | None = None) -> int:
     p_opt.add_argument("--strategy", default="vwap_mr")
 
     # ---- status ---------------------------------------------------------
-    sub.add_parser("status", help="Show cached data & latest studies")
+    sub.add_parser("status", help="Show cached data and latest studies")
 
     args = parser.parse_args(argv)
 

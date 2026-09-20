@@ -31,8 +31,12 @@ pub async fn send_raw(content: &str) -> anyhow::Result<()> {
 }
 
 pub fn format_report(kind: &str, state: &State, marks: &[(String, f64)]) -> String {
+    let live = state.mode == "live";
     let mut lines = vec![
-        format!("**crypto-bot {kind}** · {} · paper", state.mode),
+        format!(
+            "**crypto-bot {kind}** · {}",
+            if live { "LIVE Kraken" } else { "paper" }
+        ),
         format!("started `{}`", state.started_at),
         String::new(),
     ];
@@ -82,7 +86,11 @@ pub fn format_report(kind: &str, state: &State, marks: &[(String, f64)]) -> Stri
         total,
         crate::paper::NOTIONAL * state.books.len() as f64
     ));
-    lines.push("_SOL 1h trendline · ETH 1h VWAP+EMA filter · SOL buy-hold. Maker tier-3 fees. Not live._".into());
+    lines.push(if live {
+        "_SOL 1h trendline · ETH 1h VWAP+EMA filter · SOL buy-hold. LIVE Kraken limit orders._".into()
+    } else {
+        "_SOL 1h trendline · ETH 1h VWAP+EMA filter · SOL buy-hold. Maker tier-3 fees. Paper only — no exchange orders._".into()
+    });
     lines.join("\n")
 }
 

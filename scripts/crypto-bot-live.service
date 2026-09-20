@@ -1,5 +1,5 @@
 [Unit]
-Description=crypto-bot paper (Kraken 1h SOL/ETH)
+Description=crypto-bot LIVE (Kraken 1h SOL/ETH)
 After=network-online.target
 Wants=network-online.target
 
@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=%h/github/crypto
 EnvironmentFile=-%h/github/crypto/.env
-ExecStart=%h/github/crypto/scripts/run-bot.sh paper
+ExecStart=%h/github/crypto/scripts/run-bot.sh live
 Restart=always
 RestartSec=15
 

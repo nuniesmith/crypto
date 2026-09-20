@@ -1,0 +1,15 @@
+[Unit]
+Description=crypto-bot paper (Kraken 1h SOL/ETH)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/github/crypto
+EnvironmentFile=-%h/github/crypto/.env
+ExecStart=%h/github/crypto/bot/target/release/crypto-bot paper --loop
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=default.target

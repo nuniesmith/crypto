@@ -8,12 +8,11 @@ from __future__ import annotations
 
 import time
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 import pandas as pd
 import requests
 
-from .store import DATA_DIR, pair_path
+from .store import normalize_ohlcv, pair_path, save_ohlcv
 
 KRAKEN_OHLC = "https://api.kraken.com/0/public/OHLC"
 # Official pair aliases used by the public API
@@ -97,15 +96,11 @@ def fetch_pair(
     if len(df) and df.index[-1] > end - timedelta(minutes=interval):
         df = df.iloc[:-1]
 
-    if existing is not None and not existing.empty:
-        df = pd.concat([existing, df])
-        df = df[~df.index.duplicated(keep="last")].sort_index()
-
-    # keep only the requested look-back
-    cutoff = end - timedelta(days=days)
-    df = df[df.index >= cutoff]
-
-    df.to_parquet(path)
+    df = normalize_ohlcv(df)
+    # Merge into the on-disk cache. Never trim older bars — `days` only
+    # controls how far back this API walk pages (Kraken caps 1m at ~12h).
+    path = save_ohlcv(df, pair, interval)
+    df = pd.read_parquet(path)
     print(f"{pair}: {len(df):,} bars → {path}")
     return df
 

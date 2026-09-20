@@ -69,6 +69,7 @@ Usage:
 
 Default is paper. Live refuses to start without the exact confirm string.
 Discord: set DISCORD_WEBHOOK_URL for daily (15:00 UTC), weekly (Mon), monthly (1st).
+Live reports fetch Kraken /0/private/Balance and print that first; the $1k books are strategy trackers.
 "
     );
     std::process::exit(2);
@@ -128,6 +129,15 @@ async fn status_cmd() -> anyhow::Result<()> {
     let state = load_state()?;
     let client = KrakenRestClient::new().map_err(|e| anyhow::anyhow!("{e}"))?;
     let marks = fetch_marks(&client).await?;
+    let account = if state.mode == "live" {
+        load_account(None, &client, &marks).await
+    } else {
+        None
+    };
+    if let Some(a) = &account {
+        a.print();
+        println!();
+    }
     print_status(&state, &marks);
     Ok(())
 }
@@ -136,8 +146,17 @@ async fn report_cmd() -> anyhow::Result<()> {
     let mut state = load_state()?;
     let client = KrakenRestClient::new().map_err(|e| anyhow::anyhow!("{e}"))?;
     let marks = fetch_marks(&client).await?;
+    let account = if state.mode == "live" {
+        load_account(None, &client, &marks).await
+    } else {
+        None
+    };
+    if let Some(a) = &account {
+        a.print();
+        println!();
+    }
     print_status(&state, &marks);
-    discord::maybe_report(&mut state, &marks, Some("startup")).await;
+    discord::maybe_report(&mut state, &marks, Some("startup"), account.as_ref()).await;
     save_state(&state)?;
     if discord::webhook_url().is_none() {
         anyhow::bail!("set DISCORD_WEBHOOK_URL to an https://discord.com/api/webhooks/... URL");
@@ -241,28 +260,81 @@ async fn one_cycle(
     }
 
     let marks = fetch_marks(client).await.unwrap_or_default();
+    let mut kinds = Vec::new();
     if !*announced {
-        discord::maybe_report(&mut state, &marks, Some("startup")).await;
+        kinds.push("startup".into());
         *announced = true;
     }
-    discord::maybe_report(&mut state, &marks, None).await;
+    kinds.extend(discord::due_kinds(&state, None));
+    let account = if !kinds.is_empty() && matches!(mode, Mode::Live) {
+        load_account(live_gw, client, &marks).await
+    } else {
+        None
+    };
+    discord::send_kinds(&mut state, &marks, &kinds, account.as_ref()).await;
     save_state(&state)?;
     if new_bar || !events.is_empty() {
         append_journal(&serde_json::json!({
             "ts": Utc::now().to_rfc3339(),
             "mode": state.mode,
             "events": events,
+            "kraken_usd": account.as_ref().map(|a| a.total_usd),
             "equity": state.books.iter().map(|b| {
                 let px = marks.iter().find(|(p,_)| p==&b.pair).map(|(_,x)| *x).unwrap_or(0.0);
                 serde_json::json!({ "id": b.id, "pair": b.pair, "equity": b.equity(px), "pos": b.position.is_some() })
             }).collect::<Vec<_>>(),
         }))?;
+        if let Some(a) = &account {
+            a.print();
+        }
         print_status(&state, &marks);
         if let Some(b) = bars_by_pair.get("SOLUSD").and_then(|v| v.last()) {
             info!("SOL last closed 1h {} close={:.4}", fmt_ts(b.time), b.close);
         }
     }
     Ok(())
+}
+
+async fn load_account(
+    live_gw: Option<&live::LiveKraken>,
+    client: &KrakenRestClient,
+    marks: &[(String, f64)],
+) -> Option<live::AccountSnapshot> {
+    match live_gw {
+        Some(gw) => Some(snapshot_account(gw, client, marks).await),
+        None if live::keys_present() => match live::LiveKraken::from_env() {
+            Ok(gw) => Some(snapshot_account(&gw, client, marks).await),
+            Err(e) => Some(live::AccountSnapshot::failed(e.to_string())),
+        },
+        None => None,
+    }
+}
+
+async fn snapshot_account(
+    gw: &live::LiveKraken,
+    client: &KrakenRestClient,
+    marks: &[(String, f64)],
+) -> live::AccountSnapshot {
+    match gw.balances().await {
+        Ok(bals) => {
+            let mut marks = marks.to_vec();
+            for pair in live::needed_pairs(&bals) {
+                if marks.iter().any(|(p, _)| p == &pair) {
+                    continue;
+                }
+                match client.get_ticker(&pair).await {
+                    Ok(t) => {
+                        if let Some((_, tick)) = t.iter().next() {
+                            marks.push((pair, tick.last_price()));
+                        }
+                    }
+                    Err(e) => tracing::debug!("ticker {pair}: {e}"),
+                }
+            }
+            live::value_balances(&bals, &marks)
+        }
+        Err(e) => live::AccountSnapshot::failed(e.to_string()),
+    }
 }
 
 async fn fetch_closed_1h(client: &KrakenRestClient, pair: &str) -> anyhow::Result<Vec<Bar>> {

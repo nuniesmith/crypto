@@ -53,8 +53,51 @@ impl Wallet {
     }
 }
 
-/// Share of the whole account held as the BTC+USD sleeve; the rest is
-/// trading capital for the ETH/SOL 1h books. Operator's call, 2026-09-21.
+/// Which wallet policy is in force.
+///
+/// A parameter rather than a compile-time constant so BOTH configurations
+/// stay tested. Turning the sleeves off would otherwise delete the only
+/// coverage of adopt-inventory, exit-sells-the-pile, deposit absorption and
+/// trade-sleeve funding — and re-arming later would be a leap into code
+/// nothing had exercised in months.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Policy {
+    /// Whether the ETH/SOL 1h books may touch the wallet at all.
+    pub trade_sleeve: bool,
+    /// Share of the account held as BTC+USD when `trade_sleeve` is on.
+    pub core_share: f64,
+}
+
+impl Policy {
+    /// What the bot actually runs.
+    pub const LIVE: Policy = Policy { trade_sleeve: TRADE_SLEEVE_ENABLED, core_share: CORE_SHARE };
+    /// The configuration the sleeves ran under until 2026-09-21. Kept so
+    /// that behaviour stays under test while it is switched off.
+    pub const WITH_SLEEVES: Policy = Policy { trade_sleeve: true, core_share: CORE_SHARE };
+}
+
+/// Whether the ETH/SOL 1h books may touch the wallet at all.
+///
+/// **Off since 2026-09-21.** The sleeves lost to buy-and-hold on the 60-day
+/// holdout by $325 (SOL) and $280 (ETH) on a $1000 book, and ZERO of the 18
+/// cells in that run's leaders table beat BH — see docs/research.md. The
+/// repo's own gate is "a green holdout that loses to BH or fails WF is not
+/// an add-to-live"; both sleeves pass the WF half and fail the BH half, and
+/// the gate is an AND.
+///
+/// The books keep STEPPING with this off. They just never reach the wallet.
+/// That is deliberate: every bar they record is out-of-sample evidence
+/// about whether the strategy works, collected at no risk, which is worth
+/// more than deleting them and starting the question over later.
+///
+/// Turning this back on is a deliberate edit, and should follow a run where
+/// a sleeve actually clears the gate rather than a good week.
+pub const TRADE_SLEEVE_ENABLED: bool = false;
+
+/// Share of the whole account held as the BTC+USD sleeve when the trade
+/// sleeve IS enabled; the rest is trading capital. Operator's call,
+/// 2026-09-21. Unused while `TRADE_SLEEVE_ENABLED` is false — see
+/// `hold_base_usd`.
 pub const CORE_SHARE: f64 = 0.50;
 /// BTC's share WITHIN the hold sleeve. 0.70 × 0.50 = 35% of the account.
 pub const BTC_TARGET: f64 = 0.70;
@@ -172,14 +215,36 @@ pub struct Targets {
     pub trade_cash: f64,
 }
 
-pub fn targets(w: &Wallet, m: Marks) -> Targets {
+/// Dollars the BTC/USD hold sleeve spans — the denominator every target and
+/// the drift band are measured against.
+///
+/// With the trade sleeve ON it is `CORE_SHARE` of the account. With it OFF
+/// the hold is simply BTC + USD: whatever ETH and SOL are sitting there are
+/// FROZEN leftovers, excluded from the mix rather than counted into it.
+/// Counting them would pull the BTC target up by their value and make the
+/// bot buy bitcoin to offset coins it has decided not to trade.
+pub fn hold_base_usd(w: &Wallet, m: Marks, p: Policy) -> f64 {
+    let total = total_usd(w, m);
+    if p.trade_sleeve {
+        return p.core_share * total;
+    }
+    let deployed = w.eth * m.eth.max(0.0) + w.sol * m.sol.max(0.0);
+    (total - deployed).max(0.0)
+}
+
+pub fn targets(w: &Wallet, m: Marks, p: Policy) -> Targets {
     let total = total_usd(w, m);
     let deployed = w.eth * m.eth.max(0.0) + w.sol * m.sol.max(0.0);
+    let hold = hold_base_usd(w, m, p);
     Targets {
         total,
-        btc: BTC_TARGET * CORE_SHARE * total,
-        hold_cash: (1.0 - BTC_TARGET) * CORE_SHARE * total,
-        trade_cash: ((1.0 - CORE_SHARE) * total - deployed).max(0.0),
+        btc: BTC_TARGET * hold,
+        hold_cash: (1.0 - BTC_TARGET) * hold,
+        trade_cash: if p.trade_sleeve {
+            ((1.0 - p.core_share) * total - deployed).max(0.0)
+        } else {
+            0.0
+        },
     }
 }
 
@@ -194,8 +259,8 @@ pub fn targets(w: &Wallet, m: Marks) -> Targets {
 /// the target, `|btc_weight − BTC_TARGET| > BTC_BAND` is algebraically the
 /// same test `btc_rebalance` applies, so the log line and the order can no
 /// longer disagree.
-pub fn btc_weight(w: &Wallet, m: Marks) -> f64 {
-    let hold = CORE_SHARE * total_usd(w, m);
+pub fn btc_weight(w: &Wallet, m: Marks, p: Policy) -> f64 {
+    let hold = hold_base_usd(w, m, p);
     if hold <= 0.0 {
         return 0.0;
     }
@@ -208,8 +273,8 @@ pub fn btc_weight(w: &Wallet, m: Marks) -> f64 {
 /// so a rallying SOL position does not justify buying more of it; and by the
 /// cash actually on hand once the hold sleeve's dollars are set aside, so a
 /// signal can never eat the BTC sleeve's reserve.
-pub fn trade_cash_usd(w: &Wallet, m: Marks) -> f64 {
-    let t = targets(w, m);
+pub fn trade_cash_usd(w: &Wallet, m: Marks, p: Policy) -> f64 {
+    let t = targets(w, m, p);
     t.trade_cash
         .min((w.usd_available() - t.hold_cash).max(0.0))
         .max(0.0)
@@ -233,18 +298,18 @@ pub struct Rebalance {
 /// Requires a COMPLETE set of marks. A missing ETH or SOL price understates
 /// the total, which understates every target — and on the sell side that is
 /// an order for real BTC computed from a number known to be wrong.
-pub fn btc_rebalance(w: &Wallet, m: Marks) -> Option<Rebalance> {
+pub fn btc_rebalance(w: &Wallet, m: Marks, p: Policy) -> Option<Rebalance> {
     if !m.complete() {
         return None;
     }
-    let t = targets(w, m);
+    let t = targets(w, m, p);
     if t.total < 1.0 {
         return None;
     }
     let btc_usd = w.btc * m.btc;
     // The band is in points of the HOLD sleeve, so convert it to dollars
     // through that sleeve's size rather than the whole account's.
-    let hold = CORE_SHARE * t.total;
+    let hold = hold_base_usd(w, m, p);
     let delta_usd = t.btc - btc_usd;
     if delta_usd.abs() <= BTC_BAND * hold {
         return None;
@@ -302,9 +367,16 @@ pub fn signal_action(
     w: &Wallet,
     m: Marks,
     live_qty: f64,
+    p: Policy,
 ) -> LiveAction {
     if strategy == "buy_hold" {
         return LiveAction::Skip("buy_hold is mark-only");
+    }
+    if !p.trade_sleeve {
+        // Off entirely -- no buys AND no sells. Selling on an exit would
+        // liquidate the ETH/SOL that is deliberately being left alone, which
+        // is the opposite of "stop trading these".
+        return LiveAction::Skip("trade sleeve disabled — paper only");
     }
     if pair == "XBTUSD" {
         return LiveAction::Skip("BTC is HODL-only");
@@ -350,7 +422,7 @@ pub fn signal_action(
                 // sleeve and silently under-buy.
                 return LiveAction::Skip("incomplete marks — not sizing a buy");
             }
-            let spend = trade_cash_usd(w, m);
+            let spend = trade_cash_usd(w, m, p);
             let q = floor_qty(spend / mark);
             if q < min_q || spend < COST_MIN_USD {
                 return LiveAction::Skip("long signal but trade sleeve cash below min order");
@@ -369,6 +441,10 @@ pub fn signal_action(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// These assert the sleeve-ON behaviour. It is switched off live, and
+    /// stays tested here so re-arming is not a leap into cold code.
+    const P: Policy = Policy::WITH_SLEEVES;
 
     /// Prices near the live ones on 2026-09-21.
     fn marks() -> Marks {
@@ -422,7 +498,7 @@ mod tests {
     #[test]
     fn sleeves_add_up_to_the_whole_account() {
         let w = live_wallet();
-        let t = targets(&w, marks());
+        let t = targets(&w, marks(), P);
         let deployed = w.eth * marks().eth + w.sol * marks().sol;
         let sum = t.btc + t.hold_cash + t.trade_cash + deployed;
         assert!((sum - t.total).abs() < 1e-6, "sum={sum} total={}", t.total);
@@ -440,11 +516,11 @@ mod tests {
             sol: 0.0,
             usd_held: 0.0,
         };
-        let r = btc_rebalance(&w, marks()).expect("underweight BTC must be bought back");
+        let r = btc_rebalance(&w, marks(), P).expect("underweight BTC must be bought back");
         assert_eq!(r.side, 1);
         assert_eq!(r.pair, "XBTUSD");
         let after = apply(&w, &r);
-        let t = targets(&after, marks());
+        let t = targets(&after, marks(), P);
         assert!(
             (after.btc * marks().btc - t.btc).abs() < 1.0,
             "after={} target={}",
@@ -462,15 +538,15 @@ mod tests {
         // and holds 48%, so the very first rebalance SELLS roughly $24 of
         // BTC -- that is the 50/50 choice being applied, not a malfunction.
         let w = live_wallet();
-        let t = targets(&w, marks());
+        let t = targets(&w, marks(), P);
         assert!(w.btc * marks().btc > t.btc);
-        let r = btc_rebalance(&w, marks()).expect("out of band");
+        let r = btc_rebalance(&w, marks(), P).expect("out of band");
         assert_eq!(r.side, -1);
         let proceeds = r.qty * r.price;
         assert!((20.0..30.0).contains(&proceeds), "proceeds={proceeds}");
         // And the money freed lands in the trade sleeve, which is the point.
         let after = apply(&w, &r);
-        assert!(trade_cash_usd(&after, marks()) > trade_cash_usd(&w, marks()));
+        assert!(trade_cash_usd(&after, marks(), P) > trade_cash_usd(&w, marks(), P));
     }
 
     #[test]
@@ -480,17 +556,17 @@ mod tests {
         // total jumps, and every target moves with it.
         let mut w = live_wallet();
         w.usd += 500.0;
-        let r = btc_rebalance(&w, marks()).expect("a deposit must pull BTC back to target");
+        let r = btc_rebalance(&w, marks(), P).expect("a deposit must pull BTC back to target");
         assert_eq!(r.side, 1);
         let after = apply(&w, &r);
-        let t = targets(&after, marks());
+        let t = targets(&after, marks(), P);
         assert!((after.btc * marks().btc - t.btc).abs() < 1.0);
         // ...and the trade sleeve grew too, rather than the deposit being
         // swallowed whole by BTC.
         assert!(
-            trade_cash_usd(&after, marks()) > 300.0,
+            trade_cash_usd(&after, marks(), P) > 300.0,
             "trade cash {}",
-            trade_cash_usd(&after, marks())
+            trade_cash_usd(&after, marks(), P)
         );
     }
 
@@ -500,13 +576,13 @@ mod tests {
         // against the sleeve's CURRENT contents it reported 76% -- inside
         // the 60-80 band -- for a wallet the rebalancer was about to sell.
         let w = live_wallet();
-        let drift = (btc_weight(&w, marks()) - BTC_TARGET).abs();
+        let drift = (btc_weight(&w, marks(), P) - BTC_TARGET).abs();
         assert_eq!(
             drift > BTC_BAND,
-            btc_rebalance(&w, marks()).is_some(),
+            btc_rebalance(&w, marks(), P).is_some(),
             "weight says {:.3} off target, rebalancer says {:?}",
             drift,
-            btc_rebalance(&w, marks()).map(|r| r.side)
+            btc_rebalance(&w, marks(), P).map(|r| r.side)
         );
     }
 
@@ -517,12 +593,12 @@ mod tests {
         // rebalance alone would have driven the account to target and then
         // never bought another coin.
         let w = live_wallet();
-        let after = apply(&w, &btc_rebalance(&w, marks()).unwrap());
-        assert!(btc_rebalance(&after, marks()).is_none(), "should be in band now");
+        let after = apply(&w, &btc_rebalance(&w, marks(), P).unwrap());
+        assert!(btc_rebalance(&after, marks(), P).is_none(), "should be in band now");
         assert!(
-            trade_cash_usd(&after, marks()) > 40.0,
+            trade_cash_usd(&after, marks(), P) > 40.0,
             "in-band account must still have trading capital, got {}",
-            trade_cash_usd(&after, marks())
+            trade_cash_usd(&after, marks(), P)
         );
     }
 
@@ -535,23 +611,23 @@ mod tests {
             sol: 0.0,
             usd_held: 0.0,
         };
-        let r = btc_rebalance(&w, marks()).expect("sell");
+        let r = btc_rebalance(&w, marks(), P).expect("sell");
         assert_eq!(r.side, -1);
         assert!(r.qty >= MIN_BTC);
         let after = apply(&w, &r);
-        assert!(btc_rebalance(&after, marks()).is_none());
+        assert!(btc_rebalance(&after, marks(), P).is_none());
     }
 
     #[test]
     fn inside_the_band_nothing_trades() {
         let w = live_wallet();
-        let at_target = apply(&w, &btc_rebalance(&w, marks()).unwrap());
-        assert!(btc_rebalance(&at_target, marks()).is_none());
+        let at_target = apply(&w, &btc_rebalance(&w, marks(), P).unwrap());
+        assert!(btc_rebalance(&at_target, marks(), P).is_none());
         // And a small drift inside the band is left alone rather than
         // churning fees on every bar.
         let mut nudged = at_target.clone();
         nudged.btc *= 1.02;
-        assert!(btc_rebalance(&nudged, marks()).is_none());
+        assert!(btc_rebalance(&nudged, marks(), P).is_none());
     }
 
     #[test]
@@ -567,7 +643,7 @@ mod tests {
             Marks { sol: 0.0, ..marks() },
             Marks::default(),
         ] {
-            assert!(btc_rebalance(&w, bad).is_none(), "{bad:?}");
+            assert!(btc_rebalance(&w, bad, P).is_none(), "{bad:?}");
         }
     }
 
@@ -584,10 +660,11 @@ mod tests {
             &w,
             marks(),
             0.0,
+            P,
         ) {
             LiveAction::Buy { qty, .. } => {
                 let spent = qty * marks().eth;
-                let t = targets(&w, marks());
+                let t = targets(&w, marks(), P);
                 assert!(spent <= t.trade_cash + 1e-6, "spent {spent} > sleeve {}", t.trade_cash);
                 assert!(
                     w.usd - spent >= t.hold_cash - 1e-6,
@@ -609,7 +686,7 @@ mod tests {
             sol: 0.0,
             usd_held: 0.0,
         };
-        assert_eq!(trade_cash_usd(&w, marks()), 0.0);
+        assert_eq!(trade_cash_usd(&w, marks(), P), 0.0);
         assert!(matches!(
             signal_action(
                 "trendline_break",
@@ -621,6 +698,7 @@ mod tests {
                 &w,
                 marks(),
                 0.0,
+                P,
             ),
             LiveAction::Skip(_)
         ));
@@ -630,11 +708,11 @@ mod tests {
     fn buy_hold_and_btc_never_signal_trade() {
         let w = live_wallet();
         assert!(matches!(
-            signal_action("buy_hold", "SOLUSD", true, false, Some(1), marks().sol, &w, marks(), 0.0),
+            signal_action("buy_hold", "SOLUSD", true, false, Some(1), marks().sol, &w, marks(), 0.0, P),
             LiveAction::Skip(_)
         ));
         assert!(matches!(
-            signal_action("trendline_break", "XBTUSD", true, false, Some(1), marks().btc, &w, marks(), 0.0),
+            signal_action("trendline_break", "XBTUSD", true, false, Some(1), marks().btc, &w, marks(), 0.0, P),
             LiveAction::Skip(_)
         ));
     }
@@ -643,7 +721,7 @@ mod tests {
     fn long_adopts_existing_sol_pile() {
         let w = Wallet { sol: 0.169, ..live_wallet() };
         match signal_action(
-            "trendline_break", "SOLUSD", true, false, Some(1), marks().sol, &w, marks(), 0.0,
+            "trendline_break", "SOLUSD", true, false, Some(1), marks().sol, &w, marks(), 0.0, P,
         ) {
             LiveAction::Adopt { qty, .. } => assert!((qty - w.sol).abs() < 1e-8),
             other => panic!("{other:?}"),
@@ -654,7 +732,7 @@ mod tests {
     fn exit_sells_sol_pile_not_paper_qty() {
         let w = Wallet { sol: 0.169, ..live_wallet() };
         match signal_action(
-            "trendline_break", "SOLUSD", false, true, None, marks().sol, &w, marks(), w.sol,
+            "trendline_break", "SOLUSD", false, true, None, marks().sol, &w, marks(), w.sol, P,
         ) {
             LiveAction::Sell { qty, .. } => assert!((qty - w.sol).abs() < 1e-8),
             other => panic!("{other:?}"),
@@ -665,7 +743,7 @@ mod tests {
     fn paper_exit_does_not_dump_wallet() {
         let w = Wallet { sol: 0.169, ..live_wallet() };
         assert!(matches!(
-            signal_action("trendline_break", "SOLUSD", false, true, None, marks().sol, &w, marks(), 0.0),
+            signal_action("trendline_break", "SOLUSD", false, true, None, marks().sol, &w, marks(), 0.0, P),
             LiveAction::Skip(_)
         ));
     }
@@ -674,7 +752,7 @@ mod tests {
     fn short_on_flat_does_not_dump_eth() {
         let w = Wallet { eth: 0.0097, ..live_wallet() };
         assert!(matches!(
-            signal_action("structure_filtered", "ETHUSD", true, false, Some(-1), marks().eth, &w, marks(), 0.0),
+            signal_action("structure_filtered", "ETHUSD", true, false, Some(-1), marks().eth, &w, marks(), 0.0, P),
             LiveAction::Skip(_)
         ));
     }
@@ -683,7 +761,7 @@ mod tests {
     fn no_spot_short_without_inventory() {
         let w = live_wallet();
         assert!(matches!(
-            signal_action("structure_filtered", "ETHUSD", true, false, Some(-1), marks().eth, &w, marks(), 0.0),
+            signal_action("structure_filtered", "ETHUSD", true, false, Some(-1), marks().eth, &w, marks(), 0.0, P),
             LiveAction::Skip(_)
         ));
     }
@@ -692,6 +770,8 @@ mod tests {
 #[cfg(test)]
 mod held_tests {
     use super::*;
+
+    const P: Policy = Policy::WITH_SLEEVES;
 
     fn marks() -> Marks {
         Marks { btc: 84_594.0, eth: 2_692.0, sol: 115.0 }
@@ -724,8 +804,8 @@ mod held_tests {
     #[test]
     fn spendable_cash_excludes_what_an_open_order_claimed() {
         let w = live();
-        let free = trade_cash_usd(&w, marks());
-        let ignoring_hold = trade_cash_usd(&Wallet { usd_held: 0.0, ..w.clone() }, marks());
+        let free = trade_cash_usd(&w, marks(), P);
+        let ignoring_hold = trade_cash_usd(&Wallet { usd_held: 0.0, ..w.clone() }, marks(), P);
         assert!(
             free < ignoring_hold - 30.0,
             "free={free} ignoring={ignoring_hold} — the hold was not subtracted"
@@ -743,7 +823,7 @@ mod held_tests {
             eth: 0.0,
             sol: 0.0,
         };
-        if let Some(r) = btc_rebalance(&w, marks()) {
+        if let Some(r) = btc_rebalance(&w, marks(), P) {
             assert_eq!(r.side, 1);
             assert!(
                 r.qty * r.price <= w.usd_available() + 1e-9,
@@ -759,8 +839,129 @@ mod held_tests {
         // Verified against the real fill: sold 0.00031493 XBT at 84594.20,
         // leaving 0.00078514. That must now read as in-band, or the bot
         // would sell again tomorrow on an account it already fixed.
-        assert!(btc_rebalance(&live(), marks()).is_none());
-        let drift = (btc_weight(&live(), marks()) - BTC_TARGET).abs();
+        assert!(btc_rebalance(&live(), marks(), P).is_none());
+        let drift = (btc_weight(&live(), marks(), P) - BTC_TARGET).abs();
         assert!(drift <= BTC_BAND, "drift={drift}");
+    }
+}
+
+#[cfg(test)]
+mod sleeves_off_tests {
+    use super::*;
+
+    /// The policy the bot actually runs since 2026-09-21.
+    const P: Policy = Policy::LIVE;
+
+    fn marks() -> Marks {
+        Marks { btc: 84_594.0, eth: 2_692.0, sol: 115.0 }
+    }
+
+    /// The real Kraken wallet, with the 0.001 ETH left over from the last
+    /// signal fill still sitting in it.
+    fn live() -> Wallet {
+        Wallet {
+            usd: 120.4135,
+            usd_held: 0.0,
+            btc: 0.00078514,
+            eth: 0.0010000036,
+            sol: 0.0000093939,
+        }
+    }
+
+    #[test]
+    fn the_live_policy_really_is_off() {
+        assert!(!P.trade_sleeve, "LIVE must have the trade sleeve disabled");
+    }
+
+    #[test]
+    fn no_signal_can_reach_the_wallet() {
+        let w = live();
+        // A long entry, an exit with inventory to sell, and a short signal.
+        for (opened, closed, side, live_qty) in [
+            (true, false, Some(1i8), 0.0),
+            (false, true, None, 0.01),
+            (true, false, Some(-1i8), 0.0),
+        ] {
+            for (strategy, pair, mark) in [
+                ("trendline_break", "SOLUSD", marks().sol),
+                ("structure_filtered", "ETHUSD", marks().eth),
+            ] {
+                let action =
+                    signal_action(strategy, pair, opened, closed, side, mark, &w, marks(), live_qty, P);
+                assert!(
+                    matches!(action, LiveAction::Skip(_)),
+                    "{strategy} {pair} opened={opened} closed={closed} produced {action:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_exit_does_not_liquidate_the_leftover_coins() {
+        // The specific case worth naming: "stop trading these" must not mean
+        // "sell these". A book carrying a position when the sleeve went off
+        // will eventually print an exit, and that exit must do nothing.
+        let w = Wallet { eth: 0.05, ..live() };
+        let action = signal_action(
+            "structure_filtered", "ETHUSD", false, true, None, marks().eth, &w, marks(), 0.05, P,
+        );
+        assert!(matches!(action, LiveAction::Skip(_)), "{action:?}");
+    }
+
+    #[test]
+    fn there_is_no_trading_cash() {
+        assert_eq!(trade_cash_usd(&live(), marks(), P), 0.0);
+        assert_eq!(targets(&live(), marks(), P).trade_cash, 0.0);
+    }
+
+    #[test]
+    fn frozen_coins_are_excluded_from_the_hold_not_counted_into_it() {
+        // The trap: if ETH/SOL were counted into the hold base, the BTC
+        // target would rise by 70% of their value and the bot would buy
+        // bitcoin to offset coins it has decided not to trade.
+        let w = live();
+        let hold = hold_base_usd(&w, marks(), P);
+        let eth_sol = w.eth * marks().eth + w.sol * marks().sol;
+        assert!(
+            (hold - (total_usd(&w, marks()) - eth_sol)).abs() < 1e-9,
+            "hold base must be BTC + USD only"
+        );
+        let with_more_eth = Wallet { eth: w.eth + 0.05, ..w.clone() };
+        assert!(
+            (targets(&with_more_eth, marks(), P).btc - targets(&w, marks(), P).btc).abs() < 1e-6,
+            "more ETH must not move the BTC target"
+        );
+    }
+
+    #[test]
+    fn the_whole_btc_usd_balance_becomes_the_seventy_thirty_hold() {
+        // What this change does to the real account on its first bar: the
+        // hold is no longer half the account, it is all of BTC+USD, so BTC
+        // is well UNDER target and gets bought up.
+        let w = live();
+        let t = targets(&w, marks(), P);
+        let btc_usd = w.btc * marks().btc;
+        assert!(t.btc > btc_usd, "BTC should be under target, not over");
+        let r = btc_rebalance(&w, marks(), P).expect("out of band");
+        assert_eq!(r.side, 1, "should BUY bitcoin");
+        let spend = r.qty * r.price;
+        assert!((55.0..75.0).contains(&spend), "spend={spend}");
+        // ...and that lands it on target.
+        let mut after = w.clone();
+        after.btc += r.qty;
+        after.usd -= spend;
+        assert!(btc_rebalance(&after, marks(), P).is_none(), "should be in band after");
+    }
+
+    #[test]
+    fn switching_the_sleeve_back_on_changes_the_answer() {
+        // Guards against the flag being wired somewhere it does not actually
+        // matter: the two policies must disagree about this wallet.
+        let w = live();
+        assert_ne!(
+            targets(&w, marks(), Policy::LIVE).btc,
+            targets(&w, marks(), Policy::WITH_SLEEVES).btc
+        );
+        assert!(trade_cash_usd(&w, marks(), Policy::WITH_SLEEVES) > 0.0);
     }
 }

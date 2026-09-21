@@ -4,6 +4,60 @@ These decisions are why the live bot is **1h SOL + ETH only**. Raw reports land 
 
 Gate used everywhere: **Kraken Pro tier 3, maker entry, net of fees, versus buy-and-hold**, plus expanding walk-forward. A green holdout that loses to BH or fails WF is not an add-to-live.
 
+## 2026-09-21 re-run: the live sleeves do NOT clear this gate
+
+Re-ran `direction --pair SOLUSD ETHUSD XBTUSD --days 365 --holdout-days 60
+--fee-tier 3` (`20260921T115031Z_direction`) to answer one question the rest
+of this document never states: **do the two sleeves holding real money beat
+buy-and-hold?**
+
+They do not.
+
+| sleeve | n | win | holdout PnL | PF | **vs BH** | WF (1d hold) |
+|---|--:|--:|--:|--:|--:|---|
+| SOLUSD 60m `trendline_break` | 18 | 17% | +91.4 | 1.40 | **−325** | med +$118, 3/5 |
+| ETHUSD 60m `structure_filtered` | 12 | 8% | +77.9 | 1.43 | **−280** | med +$23, 3/5 |
+
+Buy-and-hold over the same holdout: **SOL +$416 (+42.6%)**, ETH +$358 (+36.8%).
+
+**Zero of the 18 cells in the holdout-leaders table beat buy-and-hold.** The
+closest is XBTUSD 60m trendline at −62 — and this document already refuses
+BTC on exactly that basis ("still lost to BH"). The rule was applied to BTC
+and not to the sleeves that went live.
+
+The gate at the top of this file says: *a green holdout that loses to BH or
+fails WF is not an add-to-live.* Both live sleeves lose to BH. They pass the
+WF half (3/5 folds, positive median) and fail the BH half. The gate is an
+AND.
+
+### What can and cannot be claimed for them
+
+- **The 60-day holdout was a bounce.** A long-only signal that sits in cash
+  much of the time is expected to lose to BH in a bull leg, so this window
+  flatters holding. That is a real caveat — and it is also exactly why the
+  gate exists: you do not get to pick the window after seeing it.
+- **IS PnL is not evidence.** SOL trendline shows IS +365.8 against a BH of
+  −680, which looks like a strategy that protects in a bear. In-sample is
+  where Optuna fitted the parameters; quoting it as edge is the mistake this
+  whole file was written to avoid. Adding IS to holdout to claim the sleeve
+  beats BH over the full 400 days is the same mistake wearing a hat.
+- **Walk-forward is the honest multi-window test**, and it is weakly
+  positive: 3/5 folds, median +$118 (SOL) and +$23 (ETH). Weak is not
+  nothing, but 3/5 is close to a coin flip on fold count.
+- **The samples are tiny.** 18 and 12 holdout trades. ETH wins **8%** of
+  them — one winner in twelve — so its entire +$77.9 rests on a single
+  trade. That is a lottery ticket, not a distribution.
+
+The tool's own recommendation line, unchanged from the run: *"Next edge is
+not trading, or a much slower trend system that has to beat BH on purpose."*
+
+### Open decision
+
+Either take the two sleeves off and let the wallet be a BTC/USD hold plus
+whatever ETH/SOL is already there, or keep them knowingly as a bear-regime
+hedge that is expected to underperform in a bounce — but not on the basis
+that this document says they passed, because it does not.
+
 ## Timeframes
 
 | Horizon | Result |
@@ -19,8 +73,8 @@ VWAP + EMA9/21 are a **filter** on structure/range breaks, not a 1m entry. Holds
 
 From the 1h walk-forward + direction grid on BTC/ETH/SOL (`20260920T134848Z_study`, `20260920T135527Z_direction`):
 
-- Lead: **SOLUSD 1h `trendline_break`**, 24h hold, maker. WF median was the only cell with 3/5 +EV folds.
-- Second: **ETHUSD 1h `structure_filtered`** (VWAP+EMA gate). Same hold.
+- Lead: **SOLUSD 1h `trendline_break`**, 24h hold, maker. WF median was the only cell with 3/5 +EV folds. **It loses to buy-and-hold on the holdout by $325 — see the 2026-09-21 re-run above.**
+- Second: **ETHUSD 1h `structure_filtered`** (VWAP+EMA gate). Same hold. **Also loses to BH, by $280.**
 - **SOLUSD buy-and-hold** as the $1k benchmark book so Discord always shows “did the signal beat sitting in SOL?”
 
 1m/15m families (`vwap_mr`, `ema_pullback`, tight range breaks) were abandoned.

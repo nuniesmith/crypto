@@ -308,6 +308,7 @@ async fn one_cycle(
                 w,
                 marks_snapshot,
                 prev_live_qty,
+                alloc::Policy::LIVE,
             );
             match action {
                 alloc::LiveAction::None => {}
@@ -368,7 +369,7 @@ async fn one_cycle(
 
     if matches!(mode, Mode::Live | Mode::LiveDry) && new_bar {
         if let Some(w) = wallet.as_ref() {
-            let t = alloc::targets(w, marks_snapshot);
+            let t = alloc::targets(w, marks_snapshot, alloc::Policy::LIVE);
             info!(
                 "wallet usd={:.2} btc={:.8} eth={:.8} sol={:.8} | total=${:.2} \
                  hold btc {:.1}% (${:.2} vs ${:.2}) cash ${:.2} | trade cash ${:.2}",
@@ -377,11 +378,11 @@ async fn one_cycle(
                 w.eth,
                 w.sol,
                 t.total,
-                100.0 * alloc::btc_weight(w, marks_snapshot),
+                100.0 * alloc::btc_weight(w, marks_snapshot, alloc::Policy::LIVE),
                 w.btc * marks_snapshot.btc,
                 t.btc,
                 t.hold_cash,
-                alloc::trade_cash_usd(w, marks_snapshot)
+                alloc::trade_cash_usd(w, marks_snapshot, alloc::Policy::LIVE)
             );
             if w.usd_held > 0.0 {
                 info!(
@@ -613,12 +614,12 @@ async fn maybe_btc_rebalance(
     if state.last_btc_rebalance == today {
         return;
     }
-    let Some(r) = alloc::btc_rebalance(w, m) else {
+    let Some(r) = alloc::btc_rebalance(w, m, alloc::Policy::LIVE) else {
         return;
     };
     info!(
         "BTC {:.1}% of hold vs target {:.0}% +/-{:.0} — rebalance {} {:.8}",
-        100.0 * alloc::btc_weight(w, m),
+        100.0 * alloc::btc_weight(w, m, alloc::Policy::LIVE),
         100.0 * alloc::BTC_TARGET,
         100.0 * alloc::BTC_BAND,
         if r.side > 0 { "buy" } else { "sell" },

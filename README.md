@@ -26,14 +26,14 @@ via `./scripts/run-bot.sh live`.
 **Live wallet (real Kraken balances, not $1k books).** Two sleeves over one
 account, both sized as a share of the account TOTAL:
 
-**The ETH/SOL signal sleeves are OFF since 2026-09-21** (`TRADE_SLEEVE_ENABLED = false`). They lost to buy-and-hold on the holdout by $325 and $280, and zero of the 18 cells in that run beat BH — see [docs/research.md](docs/research.md). The books keep stepping and recording; they just never reach the wallet, so every bar is free out-of-sample evidence.
+**The ETH/SOL sleeve was cut from 50% to 20% on 2026-09-21.** It lost to buy-and-hold on the holdout by $325 (SOL) and $280 (ETH), capturing roughly 22% of the bull move, and zero of the 18 cells in that run beat BH — see [docs/research.md](docs/research.md). It is a **bet size on a signal that failed this repo's own gate**, not an allocation to a proven edge. 20% is tuition: enough that live results mean something, little enough that another 22%-capture rally costs a few percent of the account.
 
 | Sleeve | Share | Policy |
 |---|---|---|
-| **Hold** — BTC + USD | **all of it** | BTC **70%**, cash 30%. Rebalanced **both ways** outside ±10 points, at most once per UTC day. No 1h signals on BTC. |
-| **Frozen** — ETH + SOL | leftovers | Whatever the sleeves left behind. Never bought, never sold, and **excluded from the hold base** — counting them in would raise the BTC target by 70% of their value and buy bitcoin to offset coins the bot has decided not to trade. |
+| **Hold** — BTC + USD | **80%** | BTC **70% of the sleeve** (56% of the account), cash the rest. Rebalanced **both ways** outside ±10 points, at most once per UTC day. No 1h signals on BTC. |
+| **Trade** — ETH + SOL | **20%** | `eth_1h_sf` and `sol_1h_tl` spend from this sleeve only. A new long **adopts** existing inventory rather than buying. A flat book does not dump the pile. `sol_bh` is **mark-only**. |
 
-With the sleeves on, the split was 50/50 and the trade sleeve funded ETH/SOL longs. That configuration is still tested (`Policy::WITH_SLEEVES`) so re-arming is not a leap into cold code — but re-arm on a run that clears the gate, not on a good week.
+Raising the sleeve should follow a run where it actually clears the gate — beats buy-and-hold **and** survives walk-forward — not a good week. `Policy::HOLD_ONLY` freezes ETH/SOL entirely and stays tested, so switching to it is one constant, not a rewrite.
 
 Every target is derived from the account total, so **a deposit needs no
 bookkeeping**: new USD raises the total, both sleeves' targets rise with it,

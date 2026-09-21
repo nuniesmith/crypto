@@ -202,6 +202,36 @@ impl LiveKraken {
         Ok(out)
     }
 
+    /// USD that open BUY orders have already claimed.
+    ///
+    /// Kraken's `Balance` reports the total including this, so without it
+    /// the policy sizes against money an order already spoke for. Counts
+    /// EVERY open buy, not only this bot's: an order placed by hand in the
+    /// Kraken UI, or by an earlier build of this binary, holds funds just
+    /// as effectively. (Cancelling is the opposite case and stays limited
+    /// to our own txids -- see `reap_pending_orders`.)
+    pub async fn held_usd(&self) -> anyhow::Result<f64> {
+        let open = self
+            .client
+            .get_open_orders()
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let mut held = 0.0;
+        for order in open.open.values() {
+            let Some(descr) = order.descr.as_ref() else {
+                continue;
+            };
+            if descr.side != "buy" || !descr.pair.ends_with("USD") {
+                continue;
+            }
+            let vol: f64 = order.vol.parse().unwrap_or(0.0);
+            let done: f64 = order.vol_exec.parse().unwrap_or(0.0);
+            let price: f64 = descr.price.parse().unwrap_or(0.0);
+            held += ((vol - done).max(0.0)) * price;
+        }
+        Ok(held)
+    }
+
     /// Cancel one order we placed. A txid Kraken no longer knows about
     /// (already filled, already cancelled) comes back as an error, which is
     /// not a failure for our purposes — the caller drops it either way.

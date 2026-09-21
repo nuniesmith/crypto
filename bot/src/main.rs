@@ -225,7 +225,7 @@ async fn one_cycle(
     // every price at 0.0 rather than stale. `Marks::complete()` is what the
     // policy checks before sizing anything off those zeros.
     let marks_snapshot = alloc::Marks::from_pairs(&marks);
-    let wallet = if matches!(mode, Mode::Live | Mode::LiveDry) {
+    let mut wallet = if matches!(mode, Mode::Live | Mode::LiveDry) {
         match live_gw {
             Some(gw) => gw.balances().await.ok().map(|b| alloc::Wallet::from_balances(&b)),
             None if live::keys_present() => match live::LiveKraken::from_env() {
@@ -237,6 +237,19 @@ async fn one_cycle(
     } else {
         None
     };
+
+    // Ask Kraken what its open orders have already claimed. Without this the
+    // policy sizes against `Balance`, which still counts money an order has
+    // spoken for -- measured live at $37.38 held against a $120.41 balance.
+    // A failure here leaves `usd_held` at 0, which OVERSTATES what is
+    // spendable, so it is logged rather than passed over in silence.
+    if let (Some(w), Some(gw)) = (wallet.as_mut(), live_gw) {
+        match gw.held_usd().await {
+            Ok(held) => w.usd_held = held,
+            Err(e) => warn!("open-order check failed ({e:#}) — sizing may overstate free USD"),
+        }
+    }
+
     // Staged here rather than pushed straight onto `state.pending_orders`:
     // the loop below holds a mutable borrow of `state.books` for its whole
     // body, so the state struct cannot be touched again until it ends.
@@ -360,6 +373,12 @@ async fn one_cycle(
                 t.hold_cash,
                 alloc::trade_cash_usd(w, marks_snapshot)
             );
+            if w.usd_held > 0.0 {
+                info!(
+                    "  (${:.2} of that USD is held by open orders — not spendable)",
+                    w.usd_held
+                );
+            }
             maybe_btc_rebalance(&mut state, mode, live_gw, w, marks_snapshot, &mut events).await;
         }
     }

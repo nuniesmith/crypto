@@ -27,6 +27,9 @@ pub struct Position {
     pub entry_ts: i64,
     pub entry_bar: i64,
     pub entry_fee: f64,
+    /// Qty actually adopted or bought on Kraken. 0 = paper-only, do not sell wallet.
+    #[serde(default)]
+    pub live_qty: f64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -282,6 +285,7 @@ fn enter(book: &mut Book, side: i8, bar: &Bar, maker: bool, log: &mut Vec<String
         entry_ts: bar.time,
         entry_bar: bar.time,
         entry_fee: f,
+        live_qty: 0.0,
     });
     book.fees_paid += f;
     let dir = if side > 0 { "BUY" } else { "SELL SHORT" };

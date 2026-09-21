@@ -27,7 +27,7 @@ via `./scripts/run-bot.sh live`.
 
 | Sleeve | Policy |
 |---|---|
-| BTC + USD | HODL mix **70/30 ±10%**. Rebalance at most once per UTC day, only if BTC weight of this sleeve leaves 60–80%. No 1h signals on BTC. |
+| BTC + USD | HODL mix **70/30 ±10%**. At most one rebalance per UTC day, and **only sells BTC** if the mix is above 80%. It will not auto-buy BTC with ETH/SOL/USD. No 1h signals on BTC. |
 | ETH | `eth_1h_sf` may buy/sell **this pile only**. Flat book does not dump ETH. A new long **adopts** inventory instead of buying $1k. |
 | SOL | `sol_1h_tl` same. `sol_bh` is **mark-only** (tracks wallet SOL, never places an order). |
 | USD leftover | Spendable on ETH/SOL longs only above the 30% cash floor of BTC+USD. Kraken mins: ETH 0.001, SOL 0.06. |

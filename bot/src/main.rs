@@ -230,6 +230,7 @@ async fn one_cycle(
         };
         let before_n = book.trades.len();
         let before_pos = book.position.is_some();
+        let prev_live_qty = book.position.as_ref().map(|p| p.live_qty).unwrap_or(0.0);
         let prev_bar = book.last_closed_bar;
         let notes = step_book(book, bars, now);
         if book.last_closed_bar > prev_bar {
@@ -266,6 +267,7 @@ async fn one_cycle(
                 mark,
                 w,
                 btc_px,
+                prev_live_qty,
             );
             match action {
                 alloc::LiveAction::None => {}
@@ -281,6 +283,7 @@ async fn one_cycle(
                 alloc::LiveAction::Adopt { qty, .. } => {
                     if let Some(p) = book.position.as_mut() {
                         p.qty = qty;
+                        p.live_qty = qty;
                     }
                     info!("{} ADOPT inventory qty={qty:.8} (no buy)", book.id);
                     events.push(format!("{} ADOPT {} qty={:.8}", book.id, book.pair, qty));
@@ -288,8 +291,14 @@ async fn one_cycle(
                 alloc::LiveAction::Buy { pair, qty, price } => {
                     if let Some(p) = book.position.as_mut() {
                         p.qty = qty;
+                        p.live_qty = qty;
                     }
-                    place_live(mode, live_gw, &pair, 1, qty, price, &mut events).await;
+                    let ok = place_live(mode, live_gw, &pair, 1, qty, price, &mut events).await;
+                    if !ok {
+                        if let Some(p) = book.position.as_mut() {
+                            p.live_qty = 0.0;
+                        }
+                    }
                 }
                 alloc::LiveAction::Sell { pair, qty, price } => {
                     place_live(mode, live_gw, &pair, -1, qty, price, &mut events).await;
@@ -424,7 +433,7 @@ async fn place_live(
     qty: f64,
     price: f64,
     events: &mut Vec<String>,
-) {
+) -> bool {
     let side_s = if side > 0 { "buy" } else { "sell" };
     let vol = format!("{:.8}", alloc::floor_qty(qty));
     let px = alloc::limit_price(pair, price);
@@ -440,11 +449,19 @@ async fn place_live(
     if matches!(mode, Mode::Live) {
         if let Some(gw) = live_gw {
             match gw.place_limit(pair, side, &vol, &px).await {
-                Ok(r) => info!("live order ok: {r}"),
-                Err(e) => warn!("live order failed: {e:#}"),
+                Ok(r) => {
+                    info!("live order ok: {r}");
+                    return true;
+                }
+                Err(e) => {
+                    warn!("live order failed: {e:#}");
+                    return false;
+                }
             }
         }
+        return false;
     }
+    true
 }
 
 async fn maybe_btc_rebalance(

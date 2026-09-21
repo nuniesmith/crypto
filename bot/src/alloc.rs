@@ -109,36 +109,24 @@ pub fn btc_rebalance(w: &Wallet, btc_px: f64) -> Option<Rebalance> {
         return None;
     }
     let weight = btc_weight(w, btc_px);
-    if (weight - BTC_TARGET).abs() <= BTC_BAND {
+    // Only trim BTC when overweight. Never auto-buy BTC with ETH/SOL/USD proceeds.
+    if weight <= BTC_TARGET + BTC_BAND {
         return None;
     }
-    let delta_usd = BTC_TARGET * core - w.btc * btc_px;
-    if delta_usd.abs() < COST_MIN_USD {
+    let delta_usd = w.btc * btc_px - BTC_TARGET * core;
+    if delta_usd < COST_MIN_USD {
         return None;
     }
-    if delta_usd > 0.0 {
-        let q = floor_qty((delta_usd / btc_px).min(w.usd * 0.99 / btc_px));
-        if q < MIN_BTC {
-            return None;
-        }
-        Some(Rebalance {
-            pair: "XBTUSD",
-            side: 1,
-            qty: q,
-            price: btc_px,
-        })
-    } else {
-        let q = floor_qty((-delta_usd / btc_px).min(w.btc));
-        if q < MIN_BTC {
-            return None;
-        }
-        Some(Rebalance {
-            pair: "XBTUSD",
-            side: -1,
-            qty: q,
-            price: btc_px,
-        })
+    let q = floor_qty((delta_usd / btc_px).min(w.btc));
+    if q < MIN_BTC {
+        return None;
     }
+    Some(Rebalance {
+        pair: "XBTUSD",
+        side: -1,
+        qty: q,
+        price: btc_px,
+    })
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -151,6 +139,7 @@ pub enum LiveAction {
 }
 
 /// Map a paper-book open/close onto a wallet-capped spot order.
+/// `live_qty` is inventory this book already attached on Kraken (0 = paper-only).
 pub fn signal_action(
     strategy: &str,
     pair: &str,
@@ -160,6 +149,7 @@ pub fn signal_action(
     mark: f64,
     w: &Wallet,
     btc_px: f64,
+    live_qty: f64,
 ) -> LiveAction {
     if strategy == "buy_hold" {
         return LiveAction::Skip("buy_hold is mark-only");
@@ -177,33 +167,23 @@ pub fn signal_action(
     let have = floor_qty(w.coin(pair));
 
     if closed {
-        if have < min_q {
-            if !opened {
-                return LiveAction::Skip("exit but inventory below min — not dumping dust");
-            }
-        } else if !opened || pos_side.unwrap_or(0) < 0 {
-            // Flat after exit, or flip into a short: sell the pile.
+        let q = floor_qty(live_qty.min(have));
+        if q >= min_q {
             return LiveAction::Sell {
                 pair: pair.to_string(),
-                qty: have,
+                qty: q,
                 price: mark,
             };
         }
-        // flip into a new long: sell happened conceptually; fall through to buy/adopt
-        // only if we still have coins (we wouldn't, after a real sell). Adopt/buy below.
+        if !opened {
+            return LiveAction::Skip("exit with no live inventory — not dumping wallet");
+        }
     }
 
     if opened {
         let side = pos_side.unwrap_or(0);
         if side < 0 {
-            if have >= min_q {
-                return LiveAction::Sell {
-                    pair: pair.to_string(),
-                    qty: have,
-                    price: mark,
-                };
-            }
-            return LiveAction::Skip("short signal with no inventory — no spot short");
+            return LiveAction::Skip("no spot short — not selling a flat wallet");
         }
         if side > 0 {
             if have >= min_q {
@@ -285,11 +265,11 @@ mod tests {
     fn buy_hold_and_btc_never_signal_trade() {
         let w = wallet();
         assert!(matches!(
-            signal_action("buy_hold", "SOLUSD", true, false, Some(1), 110.0, &w, 80_000.0),
+            signal_action("buy_hold", "SOLUSD", true, false, Some(1), 110.0, &w, 80_000.0, 0.0),
             LiveAction::Skip(_)
         ));
         assert!(matches!(
-            signal_action("trendline_break", "XBTUSD", true, false, Some(1), 80_000.0, &w, 80_000.0),
+            signal_action("trendline_break", "XBTUSD", true, false, Some(1), 80_000.0, &w, 80_000.0, 0.0),
             LiveAction::Skip(_)
         ));
     }
@@ -306,6 +286,7 @@ mod tests {
             111.0,
             &w,
             81_300.0,
+            0.0,
         ) {
             LiveAction::Adopt { qty, .. } => assert!((qty - w.sol).abs() < 1e-8),
             other => panic!("{other:?}"),
@@ -324,10 +305,60 @@ mod tests {
             111.0,
             &w,
             81_300.0,
+            w.sol,
         ) {
             LiveAction::Sell { qty, .. } => assert!((qty - w.sol).abs() < 1e-8),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn paper_exit_does_not_dump_wallet() {
+        let w = wallet();
+        assert!(matches!(
+            signal_action(
+                "trendline_break",
+                "SOLUSD",
+                false,
+                true,
+                None,
+                111.0,
+                &w,
+                81_300.0,
+                0.0,
+            ),
+            LiveAction::Skip(_)
+        ));
+    }
+
+    #[test]
+    fn short_on_flat_does_not_dump_eth() {
+        let w = wallet();
+        assert!(matches!(
+            signal_action(
+                "structure_filtered",
+                "ETHUSD",
+                true,
+                false,
+                Some(-1),
+                2600.0,
+                &w,
+                81_300.0,
+                0.0,
+            ),
+            LiveAction::Skip(_)
+        ));
+    }
+
+    #[test]
+    fn usd_heavy_does_not_auto_buy_btc() {
+        let w = Wallet {
+            usd: 97.0,
+            btc: 0.00110007,
+            eth: 0.0,
+            sol: 0.0,
+        };
+        assert!(btc_rebalance(&w, 81_300.0).is_none());
     }
 
     #[test]
@@ -339,7 +370,7 @@ mod tests {
             sol: 0.0,
         };
         assert!(matches!(
-            signal_action("structure_filtered", "ETHUSD", true, false, Some(-1), 2600.0, &w, 80_000.0),
+            signal_action("structure_filtered", "ETHUSD", true, false, Some(-1), 2600.0, &w, 80_000.0, 0.0),
             LiveAction::Skip(_)
         ));
     }
@@ -361,6 +392,7 @@ mod tests {
             2600.0,
             &w,
             81_300.0,
+            0.0,
         ) {
             LiveAction::Buy { qty, .. } => {
                 assert!(qty >= MIN_ETH);

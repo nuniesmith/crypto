@@ -34,7 +34,7 @@ Re-ran the 15m/1h/4h grid (`20260920T194344Z_direction`) and a daily long-only s
 - Daily SMA20 cut bear DD and kept most of the bounce; WF still 2/5.
 - SMA200 “won” the bear by not trading, then missed the recovery.
 
-**Do not add BTC 1h signals.** BTC on Kraken is a 70/30 HODL mix vs USD (±10% band, at most one rebalance per day). ETH/SOL stay as small piles the 1h books may trade; they are not sold just to sit in USD. Live order size is the wallet, not $1k.
+**Do not add BTC 1h signals.** BTC is HODL. The 70/30 mix **only sells BTC** if it is above 80% of BTC+USD — it will not buy BTC with ETH/SOL proceeds. ETH/SOL 1h books trade the wallet pile (or buy with leftover USD above the 30% cash floor). Live size is the wallet, not $1k. A paper $1k enter that never fills must not dump coins on exit.
 
 ## Other Kraken USD names (screenshot screen)
 

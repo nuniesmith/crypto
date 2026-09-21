@@ -64,7 +64,7 @@ Cadence: startup on process start; daily from 15:00 UTC; weekly Monday; monthly 
    - long enter + no inventory: buy with USD **above** the 30% BTC+USD cash floor, if it clears Kraken min (ETH 0.001 / SOL 0.06).
    - exit / short signal: **sell the ETH or SOL pile**, never more than the wallet.
    - never open a spot short, never trade BTC on a 1h signal.
-5. On a new 1h bar, at most once per UTC day, rebalance BTC vs USD if weight is outside 60–80%.
+5. On a new 1h bar, at most once per UTC day, **sell** BTC if BTC is above 80% of BTC+USD. It never auto-buys BTC (so selling ETH/SOL does not get swept into more bitcoin).
 6. Save state. Log only on new bar or trade.
 
 ## Safety

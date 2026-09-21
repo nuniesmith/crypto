@@ -4,6 +4,7 @@
 use async_trait::async_trait;
 use exchange_apiws::{KrakenCredentials, KrakenPrivateClient};
 use rustrade::{Capability, ExchangeClient, Order, Position, Result, Side, Symbol};
+use std::collections::HashMap;
 
 pub struct LiveKraken {
     client: KrakenPrivateClient,
@@ -230,6 +231,37 @@ impl LiveKraken {
             held += ((vol - done).max(0.0)) * price;
         }
         Ok(held)
+    }
+
+    /// Executed volume for every order that has left the book, by txid.
+    ///
+    /// ONE call covers every order we are tracking, which is what makes
+    /// settling against real fills affordable — the per-order query this
+    /// originally avoided would have been a private call each.
+    ///
+    /// An order still open is simply absent: `ClosedOrders` is the closed set,
+    /// and "not settled yet" and "settled at zero" must not look alike.
+    ///
+    /// Status is deliberately ignored. A `canceled` order can still have
+    /// executed — 2026-09-21's ETH entry came back `canceled` with
+    /// `vol_exec=0.00100000` of `0.01488212`, which is exactly the number the
+    /// book needed and exactly what the old age-only reaper threw away.
+    ///
+    /// Kraken returns the most recent page only (50 of 134 on that account),
+    /// which is ample for orders minutes old. One that somehow aged past the
+    /// page would never settle, and `SETTLE_GIVE_UP_SECS` bounds that.
+    pub async fn executed_volumes(&self) -> anyhow::Result<HashMap<String, f64>> {
+        let closed = self
+            .client
+            .get_closed_orders()
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        Ok(closed
+            .closed
+            .into_iter()
+            .filter_map(|(txid, o)| o.vol_exec.parse::<f64>().ok().map(|v| (txid, v)))
+            .filter(|(_, v)| v.is_finite())
+            .collect())
     }
 
     /// Cancel one order we placed. A txid Kraken no longer knows about

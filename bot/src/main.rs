@@ -218,7 +218,7 @@ async fn one_cycle(
 
     // Before ANY sizing: release USD held by our own stale orders, so the
     // wallet read below reflects money we can actually spend.
-    reap_pending_orders(&mut state, mode, live_gw, now, &mut events).await;
+    settle_pending_orders(&mut state, mode, live_gw, now, &mut events).await;
 
     let marks = fetch_marks(client).await.unwrap_or_default();
     // `fetch_marks` returns an EMPTY vec on any error, so an outage leaves
@@ -341,6 +341,8 @@ async fn one_cycle(
                             pair: pair.clone(),
                             side: 1,
                             placed_at: now,
+                            book: Some(book.id.clone()),
+                            qty,
                         });
                     }
                     if !placed.acted() {
@@ -358,6 +360,8 @@ async fn one_cycle(
                             pair: pair.clone(),
                             side: -1,
                             placed_at: now,
+                            book: Some(book.id.clone()),
+                            qty,
                         });
                     }
                 }
@@ -562,12 +566,25 @@ async fn place_live(
 /// money that is not there.
 const ORDER_TTL_SECS: i64 = 600;
 
-/// Cancel our own stale orders and forget them.
+/// Seconds before an order that never settles is abandoned.
+///
+/// Far longer than the cancel TTL on purpose: this is the leak guard, not the
+/// trading rule. Anything reaching it is a Kraken-side anomaly, not a slow fill.
+const SETTLE_GIVE_UP_SECS: i64 = 86_400;
+
+/// Settle our own orders against what they actually executed, and cancel
+/// the stale ones still sitting open.
+///
+/// An order stays tracked until it has been SETTLED, not until it has been
+/// cancelled. A cancel only takes effect at Kraken; the executed volume shows
+/// up in `ClosedOrders` on the tick after, and that number is what the book
+/// needs. Dropping the order at cancel time is what used to leave books long
+/// positions the account never received.
 ///
 /// Only touches txids this bot recorded. `cancel_all_orders` would be
 /// simpler and would also wipe limit orders the operator placed by hand on
 /// the same account.
-async fn reap_pending_orders(
+async fn settle_pending_orders(
     state: &mut paper::State,
     mode: Mode,
     live_gw: Option<&live::LiveKraken>,
@@ -578,26 +595,99 @@ async fn reap_pending_orders(
         return;
     }
     let Some(gw) = live_gw else { return };
-    let (stale, fresh) =
-        paper::partition_stale(std::mem::take(&mut state.pending_orders), now, ORDER_TTL_SECS);
-    state.pending_orders = fresh;
-    for order in stale {
-        match gw.cancel(&order.txid).await {
-            Ok(()) => {
-                let msg = format!(
-                    "CANCEL stale {} {} {} (unfilled {}s)",
-                    if order.side > 0 { "buy" } else { "sell" },
-                    order.pair,
-                    order.txid,
-                    now - order.placed_at
-                );
-                info!("{msg}");
-                events.push(msg);
-            }
-            // Already filled or already gone. Dropping it is the right
-            // move either way: we only ever cancel by our own txid, so a
-            // txid Kraken does not recognise is nothing left to manage.
-            Err(e) => info!("cancel {}: {e:#} — dropping", order.txid),
+    // On an outage: cancel nothing, settle nothing, keep every order tracked.
+    // Treating an unreachable exchange as "nothing executed" would withdraw
+    // real entries from the books.
+    let executed = match gw.executed_volumes().await {
+        Ok(map) => map,
+        Err(e) => {
+            warn!("closed orders unreadable ({e:#}) — deferring settlement");
+            return;
+        }
+    };
+
+    let (actions, still_pending) = paper::plan_settlement(
+        std::mem::take(&mut state.pending_orders),
+        &executed,
+        now,
+        ORDER_TTL_SECS,
+        SETTLE_GIVE_UP_SECS,
+    );
+    state.pending_orders = still_pending;
+
+    for action in actions {
+        match action {
+            paper::OrderAction::Settle(order, got) => settle_one(state, &order, got, events),
+            paper::OrderAction::Cancel(order) => match gw.cancel(&order.txid).await {
+                Ok(()) => {
+                    let msg = format!(
+                        "CANCEL stale {} {} {} (unfilled {}s)",
+                        if order.side > 0 { "buy" } else { "sell" },
+                        order.pair,
+                        order.txid,
+                        now - order.placed_at
+                    );
+                    info!("{msg}");
+                    events.push(msg);
+                }
+                Err(e) => info!("cancel {}: {e:#}", order.txid),
+            },
+            paper::OrderAction::GiveUp(order) => warn!(
+                "giving up on {} after {}s unsettled — book left as placed",
+                order.txid,
+                now - order.placed_at
+            ),
+        }
+    }
+}
+
+/// Apply one settled order to the book that placed it.
+fn settle_one(state: &mut paper::State, order: &paper::PendingOrder, got: f64, events: &mut Vec<String>) {
+    if order.side < 0 {
+        // A sell is an EXIT, and `step_book` already closed the position and
+        // wrote the Trade before the order went out. Unwinding that would mean
+        // rewriting trade history; an exit that did not fill leaves real coins
+        // in the wallet instead, which the operator needs to see rather than
+        // have quietly reconciled away.
+        if order.qty > 0.0 && got + 1e-9 < order.qty {
+            let msg = format!(
+                "UNSOLD {} {:.8} of {:.8} did not fill — wallet still holds it",
+                order.pair,
+                order.qty - got,
+                order.qty
+            );
+            warn!("{msg}");
+            events.push(msg);
+        }
+        return;
+    }
+
+    let Some(book_id) = order.book.as_deref() else {
+        // No book: this was the BTC rebalance. If it executed nothing, the
+        // day's single attempt was never really spent, so let it retry rather
+        // than leave the account outside its band until tomorrow.
+        if order.qty > 0.0 && got <= 1e-9 {
+            let msg = format!("BTC rebalance {} never filled — will retry", order.txid);
+            info!("{msg}");
+            events.push(msg);
+            state.last_btc_rebalance.clear();
+        }
+        return;
+    };
+    let Some(book) = state.books.iter_mut().find(|b| b.id == book_id) else {
+        return;
+    };
+    match paper::settle_buy(book, order.qty, got) {
+        paper::Settled::Filled => {}
+        paper::Settled::Partial { ordered, got } => {
+            let msg = format!("{book_id} PARTIAL fill {got:.8} of {ordered:.8} — book resized");
+            info!("{msg}");
+            events.push(msg);
+        }
+        paper::Settled::Nothing => {
+            let msg = format!("{book_id} NO fill on {} — entry withdrawn", order.txid);
+            info!("{msg}");
+            events.push(msg);
         }
     }
 }
@@ -635,6 +725,8 @@ async fn maybe_btc_rebalance(
             pair: r.pair.to_string(),
             side: r.side,
             placed_at: Utc::now().timestamp(),
+            book: None,
+            qty: r.qty,
         });
     }
     if placed.acted() {
@@ -654,4 +746,120 @@ async fn fetch_marks(client: &KrakenRestClient) -> anyhow::Result<Vec<(String, f
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod settle_tests {
+    use super::*;
+
+    fn state() -> paper::State {
+        let mut s = paper::State::default_paper();
+        s.mode = "live".into();
+        s.last_btc_rebalance = "2026-09-21".into();
+        for b in &mut s.books {
+            b.position = Some(paper::Position {
+                side: 1,
+                qty: 0.0149,
+                entry: 2_696.09,
+                entry_ts: 0,
+                entry_bar: 0,
+                entry_fee: 2.30,
+                live_qty: 0.0149,
+            });
+        }
+        s
+    }
+
+    fn buy(book: Option<&str>, qty: f64) -> paper::PendingOrder {
+        paper::PendingOrder {
+            txid: "OTEST-1".into(),
+            pair: "ETHUSD".into(),
+            side: 1,
+            placed_at: 0,
+            book: book.map(str::to_string),
+            qty,
+        }
+    }
+
+    #[test]
+    fn an_unfilled_buy_corrects_only_the_book_that_placed_it() {
+        // Routing by id, not by position in the list. Correcting the wrong
+        // book would destroy a good record AND leave the bad one standing.
+        let mut s = state();
+        let mut events = Vec::new();
+        settle_one(&mut s, &buy(Some("eth_1h_sf"), 0.0149), 0.0, &mut events);
+
+        let by_id = |id: &str| s.books.iter().find(|b| b.id == id).unwrap();
+        assert!(by_id("eth_1h_sf").position.is_none(), "the phantom goes");
+        assert!(by_id("sol_1h_tl").position.is_some(), "untouched");
+        assert!(by_id("sol_bh").position.is_some(), "untouched");
+    }
+
+    #[test]
+    fn an_order_naming_an_unknown_book_is_ignored() {
+        let mut s = state();
+        let mut events = Vec::new();
+        settle_one(&mut s, &buy(Some("deleted_book"), 0.0149), 0.0, &mut events);
+        assert!(s.books.iter().all(|b| b.position.is_some()));
+    }
+
+    #[test]
+    fn an_unfilled_btc_rebalance_frees_the_day_to_retry() {
+        // The rebalance runs once per UTC day. Marking the day spent on an
+        // order that executed NOTHING leaves the account outside its band for
+        // another 24h with nothing retrying -- the same reasoning that already
+        // stops a REJECTED order from burning the day, extended to an accepted
+        // order that never filled.
+        let mut s = state();
+        let mut events = Vec::new();
+        settle_one(&mut s, &buy(None, 0.0003), 0.0, &mut events);
+        assert!(s.last_btc_rebalance.is_empty(), "the day must be retryable");
+        assert!(events.iter().any(|e| e.contains("never filled")));
+    }
+
+    #[test]
+    fn a_filled_btc_rebalance_keeps_the_day_spent() {
+        let mut s = state();
+        let mut events = Vec::new();
+        settle_one(&mut s, &buy(None, 0.0003), 0.0003, &mut events);
+        assert_eq!(s.last_btc_rebalance, "2026-09-21");
+    }
+
+    #[test]
+    fn a_partially_filled_btc_rebalance_does_not_retry_the_whole_size() {
+        // It moved the account toward the band. Retrying the FULL size today
+        // would overshoot; the next day's pass sizes against reality.
+        let mut s = state();
+        let mut events = Vec::new();
+        settle_one(&mut s, &buy(None, 0.0003), 0.0002, &mut events);
+        assert_eq!(s.last_btc_rebalance, "2026-09-21");
+    }
+
+    #[test]
+    fn an_unfilled_sell_is_reported_and_never_rewrites_the_book() {
+        // A sell is an exit: `step_book` already closed the position and wrote
+        // the Trade. The coins are still in the wallet -- that is an operator
+        // fact to surface, not a book to quietly reconcile.
+        let mut s = state();
+        let mut events = Vec::new();
+        let mut order = buy(Some("eth_1h_sf"), 0.0149);
+        order.side = -1;
+        settle_one(&mut s, &order, 0.0, &mut events);
+
+        assert!(
+            s.books.iter().all(|b| b.position.is_some()),
+            "a sell must not run the buy correction"
+        );
+        assert!(events.iter().any(|e| e.starts_with("UNSOLD")));
+    }
+
+    #[test]
+    fn a_sell_that_filled_says_nothing() {
+        let mut s = state();
+        let mut events = Vec::new();
+        let mut order = buy(Some("eth_1h_sf"), 0.0149);
+        order.side = -1;
+        settle_one(&mut s, &order, 0.0149, &mut events);
+        assert!(events.is_empty());
+    }
 }

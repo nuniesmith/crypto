@@ -26,10 +26,31 @@
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Wallet {
+    /// TOTAL USD as Kraken's `Balance` reports it — money reserved by an
+    /// open order is still counted here, because it is still yours and the
+    /// account is still worth it.
     pub usd: f64,
     pub btc: f64,
     pub eth: f64,
     pub sol: f64,
+    /// USD an open buy order has already claimed. Not spendable twice.
+    ///
+    /// Kraken's `Balance` does NOT subtract this; only `BalanceEx`'s
+    /// `hold_trade` and the open-order book show it. Measured on the live
+    /// account on 2026-09-21: `ZUSD balance=120.41 hold_trade=37.38`, so a
+    /// policy reading `Balance` alone believed it had $37 more to spend
+    /// than existed, and would have sized an order Kraken then rejected.
+    pub usd_held: f64,
+}
+
+impl Wallet {
+    /// USD that can actually be committed to a new order right now.
+    ///
+    /// Everything that VALUES the account uses `usd` (held money still
+    /// counts); everything that SPENDS uses this.
+    pub fn usd_available(&self) -> f64 {
+        (self.usd - self.usd_held).max(0.0)
+    }
 }
 
 /// Share of the whole account held as the BTC+USD sleeve; the rest is
@@ -189,7 +210,9 @@ pub fn btc_weight(w: &Wallet, m: Marks) -> f64 {
 /// signal can never eat the BTC sleeve's reserve.
 pub fn trade_cash_usd(w: &Wallet, m: Marks) -> f64 {
     let t = targets(w, m);
-    t.trade_cash.min((w.usd - t.hold_cash).max(0.0)).max(0.0)
+    t.trade_cash
+        .min((w.usd_available() - t.hold_cash).max(0.0))
+        .max(0.0)
 }
 
 #[derive(Clone, Debug)]
@@ -234,7 +257,7 @@ pub fn btc_rebalance(w: &Wallet, m: Marks) -> Option<Rebalance> {
         // being short exactly mirrors USD being long, so in the ordinary
         // case this cap does not bind; it bites only when ETH/SOL inventory
         // has overrun its own sleeve and there is no spare dollar.
-        let spend = delta_usd.min(w.usd);
+        let spend = delta_usd.min(w.usd_available());
         let q = floor_qty(spend / m.btc);
         if q < MIN_BTC || spend < COST_MIN_USD {
             return None;
@@ -364,6 +387,7 @@ mod tests {
             btc: 0.00110007,
             eth: 0.0,
             sol: 0.00000939,
+            usd_held: 0.0,
         }
     }
 
@@ -414,6 +438,7 @@ mod tests {
             btc: 0.0005,
             eth: 0.0,
             sol: 0.0,
+            usd_held: 0.0,
         };
         let r = btc_rebalance(&w, marks()).expect("underweight BTC must be bought back");
         assert_eq!(r.side, 1);
@@ -508,6 +533,7 @@ mod tests {
             btc: 0.002,
             eth: 0.0,
             sol: 0.0,
+            usd_held: 0.0,
         };
         let r = btc_rebalance(&w, marks()).expect("sell");
         assert_eq!(r.side, -1);
@@ -581,6 +607,7 @@ mod tests {
             btc: 0.0,
             eth: 0.1,
             sol: 0.0,
+            usd_held: 0.0,
         };
         assert_eq!(trade_cash_usd(&w, marks()), 0.0);
         assert!(matches!(
@@ -659,5 +686,81 @@ mod tests {
             signal_action("structure_filtered", "ETHUSD", true, false, Some(-1), marks().eth, &w, marks(), 0.0),
             LiveAction::Skip(_)
         ));
+    }
+}
+
+#[cfg(test)]
+mod held_tests {
+    use super::*;
+
+    fn marks() -> Marks {
+        Marks { btc: 84_594.0, eth: 2_692.0, sol: 115.0 }
+    }
+
+    /// The live account at 10:05 UTC on 2026-09-21, straight off Kraken:
+    /// ZUSD balance 120.41 with 37.38 held by an open ETH buy left behind
+    /// by the previous binary.
+    fn live() -> Wallet {
+        Wallet {
+            usd: 120.4135,
+            usd_held: 37.3751,
+            btc: 0.00078514,
+            eth: 0.0010000036,
+            sol: 0.0000093939,
+        }
+    }
+
+    #[test]
+    fn held_usd_still_counts_toward_what_the_account_is_worth() {
+        // It is still your money -- it just cannot be spent twice. If the
+        // total dropped by the held amount, every target would shrink and
+        // the bot would trade to chase its own open order.
+        let w = live();
+        let with_hold = total_usd(&w, marks());
+        let without = total_usd(&Wallet { usd_held: 0.0, ..w.clone() }, marks());
+        assert!((with_hold - without).abs() < 1e-9);
+    }
+
+    #[test]
+    fn spendable_cash_excludes_what_an_open_order_claimed() {
+        let w = live();
+        let free = trade_cash_usd(&w, marks());
+        let ignoring_hold = trade_cash_usd(&Wallet { usd_held: 0.0, ..w.clone() }, marks());
+        assert!(
+            free < ignoring_hold - 30.0,
+            "free={free} ignoring={ignoring_hold} — the hold was not subtracted"
+        );
+        assert!(free <= w.usd_available() + 1e-9);
+    }
+
+    #[test]
+    fn a_buy_rebalance_cannot_commit_held_dollars() {
+        // BTC deeply underweight, but nearly all the cash is spoken for.
+        let w = Wallet {
+            usd: 100.0,
+            usd_held: 95.0,
+            btc: 0.0001,
+            eth: 0.0,
+            sol: 0.0,
+        };
+        if let Some(r) = btc_rebalance(&w, marks()) {
+            assert_eq!(r.side, 1);
+            assert!(
+                r.qty * r.price <= w.usd_available() + 1e-9,
+                "sized {} against {} free",
+                r.qty * r.price,
+                w.usd_available()
+            );
+        }
+    }
+
+    #[test]
+    fn the_rebalance_that_just_ran_left_btc_in_band() {
+        // Verified against the real fill: sold 0.00031493 XBT at 84594.20,
+        // leaving 0.00078514. That must now read as in-band, or the bot
+        // would sell again tomorrow on an account it already fixed.
+        assert!(btc_rebalance(&live(), marks()).is_none());
+        let drift = (btc_weight(&live(), marks()) - BTC_TARGET).abs();
+        assert!(drift <= BTC_BAND, "drift={drift}");
     }
 }

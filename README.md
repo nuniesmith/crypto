@@ -23,14 +23,25 @@ Command actually executed:
 
 via `./scripts/run-bot.sh live`.
 
-**Live wallet (real Kraken balances, not $1k books):**
+**Live wallet (real Kraken balances, not $1k books).** Two sleeves over one
+account, both sized as a share of the account TOTAL:
 
-| Sleeve | Policy |
-|---|---|
-| BTC + USD | HODL mix **70/30 ±10%**. At most one rebalance per UTC day, and **only sells BTC** if the mix is above 80%. It will not auto-buy BTC with ETH/SOL/USD. No 1h signals on BTC. |
-| ETH | `eth_1h_sf` may buy/sell **this pile only**. Flat book does not dump ETH. A new long **adopts** inventory instead of buying $1k. |
-| SOL | `sol_1h_tl` same. `sol_bh` is **mark-only** (tracks wallet SOL, never places an order). |
-| USD leftover | Spendable on ETH/SOL longs only above the 30% cash floor of BTC+USD. Kraken mins: ETH 0.001, SOL 0.06. |
+| Sleeve | Share | Policy |
+|---|---|---|
+| **Hold** — BTC + USD | 50% | BTC is **70% of the sleeve** (35% of the account), cash the rest. Rebalanced **both ways** outside ±10 points, at most once per UTC day. No 1h signals on BTC. |
+| **Trade** — ETH + SOL | 50% | `eth_1h_sf` and `sol_1h_tl` spend from this sleeve only. A new long **adopts** existing inventory rather than buying. A flat book does not dump the pile. `sol_bh` is **mark-only**. |
+
+Every target is derived from the account total, so **a deposit needs no
+bookkeeping**: new USD raises the total, both sleeves' targets rise with it,
+and the next rebalance buys BTC back to target while the rest becomes trading
+capital. Kraken mins (verified against `/0/public/AssetPairs`): XBT 0.00005,
+ETH 0.001, SOL 0.06, cost min $0.50.
+
+Why the hold is a share of the *account* and not just "BTC vs USD": funding
+ETH/SOL from `USD − 30% of (BTC+USD)` is exactly **zero** once BTC+USD sits at
+70/30. The old one-directional rebalancer only ever worked because BTC was
+underweight; making it two-sided without this change would have driven BTC to
+target and then never bought another coin.
 
 Loop wakes every 60s and **only acts on a new closed 1h bar**. Live path places Kraken **limit** orders, wallet-capped. Spot: no short opens. Fees in the paper-scale books: tier-3 maker 0.22% + 1 bp slip.
 

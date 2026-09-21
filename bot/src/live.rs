@@ -202,6 +202,17 @@ impl LiveKraken {
         Ok(out)
     }
 
+    /// Cancel one order we placed. A txid Kraken no longer knows about
+    /// (already filled, already cancelled) comes back as an error, which is
+    /// not a failure for our purposes — the caller drops it either way.
+    pub async fn cancel(&self, txid: &str) -> anyhow::Result<()> {
+        self.client
+            .cancel_order(txid)
+            .await
+            .map(|_| ())
+            .map_err(|e| anyhow::anyhow!("{e}"))
+    }
+
     pub async fn place_limit(
         &self,
         pair: &str,

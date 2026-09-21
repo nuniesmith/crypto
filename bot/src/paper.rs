@@ -69,9 +69,34 @@ pub struct State {
     pub last_weekly: String,
     #[serde(default)]
     pub last_monthly: String,
-    /// UTC date `YYYY-MM-DD` of the last BTC 70/30 rebalance attempt.
+    /// UTC date `YYYY-MM-DD` of the last BTC rebalance actually placed.
     #[serde(default)]
     pub last_btc_rebalance: String,
+    /// Live limit orders this bot placed that have not been seen to fill.
+    #[serde(default)]
+    pub pending_orders: Vec<PendingOrder>,
+}
+
+/// One live order we placed and are still responsible for.
+///
+/// Kraken limit orders do not expire, `place_order` here takes no `expiretm`
+/// or `userref`, and nothing used to cancel them — so an order priced at the
+/// last trade and left unfilled sat on the book forever, holding USD that
+/// `Balance` still reports as available. The next cycle would then size a
+/// second order against money the first one had already reserved.
+///
+/// Only orders in this list are ever cancelled. Cancelling everything open
+/// would be one line, and would also kill limit orders the operator placed
+/// by hand in the Kraken UI on an account that is also theirs.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct PendingOrder {
+    pub txid: String,
+    pub pair: String,
+    pub side: i8,
+    /// Unix seconds. Age is what decides a cancel, not fill state: reading
+    /// fill state needs another private call per order, and a 1h-bar
+    /// decision that has not filled in minutes is stale regardless.
+    pub placed_at: i64,
 }
 
 impl State {
@@ -88,6 +113,7 @@ impl State {
             last_weekly: String::new(),
             last_monthly: String::new(),
             last_btc_rebalance: String::new(),
+            pending_orders: Vec::new(),
         }
     }
 }
@@ -119,6 +145,21 @@ impl Book {
 
 fn fee(notional: f64, maker: bool) -> f64 {
     notional * ((if maker { MAKER_FEE } else { TAKER_FEE }) + SLIP)
+}
+
+/// Split tracked orders into (stale, still fresh).
+///
+/// Pulled out of the async reaper so the age rule can be checked against
+/// exact timestamps without a Kraken gateway — the same reason the wallet
+/// policy in alloc.rs is plain functions over a `Wallet`.
+pub fn partition_stale(
+    orders: Vec<PendingOrder>,
+    now: i64,
+    ttl_secs: i64,
+) -> (Vec<PendingOrder>, Vec<PendingOrder>) {
+    orders
+        .into_iter()
+        .partition(|o| now - o.placed_at >= ttl_secs)
 }
 
 pub fn data_dir() -> PathBuf {
@@ -369,3 +410,70 @@ pub fn print_status(state: &State, marks: &[(String, f64)]) {
 }
 
 
+
+#[cfg(test)]
+mod order_tests {
+    use super::*;
+
+    fn order(txid: &str, placed_at: i64) -> PendingOrder {
+        PendingOrder {
+            txid: txid.into(),
+            pair: "ETHUSD".into(),
+            side: 1,
+            placed_at,
+        }
+    }
+
+    #[test]
+    fn an_order_younger_than_the_ttl_is_left_alone() {
+        let (stale, fresh) = partition_stale(vec![order("A", 1_000)], 1_500, 600);
+        assert!(stale.is_empty());
+        assert_eq!(fresh.len(), 1);
+    }
+
+    #[test]
+    fn an_order_at_or_past_the_ttl_is_cancelled() {
+        let (stale, fresh) = partition_stale(vec![order("A", 1_000)], 1_600, 600);
+        assert_eq!(stale.len(), 1);
+        assert!(fresh.is_empty());
+    }
+
+    #[test]
+    fn each_order_is_judged_on_its_own_age() {
+        let (stale, fresh) = partition_stale(
+            vec![order("old", 0), order("new", 1_400)],
+            1_500,
+            600,
+        );
+        assert_eq!(stale.iter().map(|o| o.txid.as_str()).collect::<Vec<_>>(), ["old"]);
+        assert_eq!(fresh.iter().map(|o| o.txid.as_str()).collect::<Vec<_>>(), ["new"]);
+    }
+
+    #[test]
+    fn a_clock_that_goes_backwards_cancels_nothing() {
+        // An NTP step or a stale `now` must not look like extreme age and
+        // sweep away an order that was placed seconds ago.
+        let (stale, fresh) = partition_stale(vec![order("A", 2_000)], 1_000, 600);
+        assert!(stale.is_empty());
+        assert_eq!(fresh.len(), 1);
+    }
+
+    #[test]
+    fn a_state_file_written_before_order_tracking_still_loads() {
+        // The bot restarts onto an existing state.json. If the new field
+        // were not `#[serde(default)]`, every deploy would fail to parse the
+        // live state and the loop would come up with fresh $1k books.
+        let old = r#"{
+            "started_at": "2026-09-20T18:42:16Z",
+            "mode": "live",
+            "books": [],
+            "last_daily": "",
+            "last_weekly": "",
+            "last_monthly": "",
+            "last_btc_rebalance": "2026-09-20"
+        }"#;
+        let s: State = serde_json::from_str(old).expect("old state must still parse");
+        assert!(s.pending_orders.is_empty());
+        assert_eq!(s.last_btc_rebalance, "2026-09-20");
+    }
+}

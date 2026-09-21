@@ -23,21 +23,20 @@ Command actually executed:
 
 via `./scripts/run-bot.sh live`.
 
-Three **internal $1k books** (strategy trackers, not Kraken cash):
+**Live wallet (real Kraken balances, not $1k books):**
 
-| Book | Pair | Rule | Hold |
-|---|---|---|---|
-| `sol_1h_tl` | SOLUSD | `trendline_break` | 24 × 1h |
-| `eth_1h_sf` | ETHUSD | `structure_filtered` (VWAP+EMA gate) | 24 × 1h |
-| `sol_bh` | SOLUSD | buy-and-hold benchmark | until flattened |
+| Sleeve | Policy |
+|---|---|
+| BTC + USD | HODL mix **70/30 ±10%**. Rebalance at most once per UTC day, only if BTC weight of this sleeve leaves 60–80%. No 1h signals on BTC. |
+| ETH | `eth_1h_sf` may buy/sell **this pile only**. Flat book does not dump ETH. A new long **adopts** inventory instead of buying $1k. |
+| SOL | `sol_1h_tl` same. `sol_bh` is **mark-only** (tracks wallet SOL, never places an order). |
+| USD leftover | Spendable on ETH/SOL longs only above the 30% cash floor of BTC+USD. Kraken mins: ETH 0.001, SOL 0.06. |
 
-Loop wakes every 60s and **only acts on a new closed 1h bar**. Live path places Kraken **limit** orders. Fees in the books: Kraken Pro tier-3 maker 0.22% + 1 bp slip (taker 0.38% if used).
+Loop wakes every 60s and **only acts on a new closed 1h bar**. Live path places Kraken **limit** orders, wallet-capped. Spot: no short opens. Fees in the paper-scale books: tier-3 maker 0.22% + 1 bp slip.
 
-Discord (`DISCORD_WEBHOOK_URL`): startup, daily ~15:00 UTC, weekly Monday, monthly 1st. Live reports fetch `POST /0/private/Balance` and print the **real Kraken account first**. The $1k books are labeled as internal trackers.
+Discord (`DISCORD_WEBHOOK_URL`): startup, daily ~15:00 UTC, weekly Monday, monthly 1st. Live reports fetch `POST /0/private/Balance` first, then the policy line, then paper-scale books.
 
-Not in the live bot: BTC, XRP, FET, TRUMP, memes, forex. See [docs/research.md](docs/research.md).
-
-Known gap: the books are the source of truth for position. `sol_bh` long size is the internal $1k mark, not necessarily the SOL sitting on Kraken.
+Not in the live bot: XRP, FET, TRUMP, memes, forex. See [docs/research.md](docs/research.md).
 
 ## Operate (oryx)
 

@@ -66,6 +66,9 @@ pub struct State {
     pub last_weekly: String,
     #[serde(default)]
     pub last_monthly: String,
+    /// UTC date `YYYY-MM-DD` of the last BTC 70/30 rebalance attempt.
+    #[serde(default)]
+    pub last_btc_rebalance: String,
 }
 
 impl State {
@@ -81,6 +84,7 @@ impl State {
             last_daily: String::new(),
             last_weekly: String::new(),
             last_monthly: String::new(),
+            last_btc_rebalance: String::new(),
         }
     }
 }

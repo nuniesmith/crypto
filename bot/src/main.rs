@@ -3,10 +3,8 @@
 //! Crates: `exchange-apiws` (Kraken), `indicators-ta` (EMA/ATR/VWAP),
 //! `rustrade-framework` (Brain + ExchangeClient for the live path).
 //!
-//! Books (direction study — 1m/15m scalps are dead):
-//!   sol_1h_tl  SOLUSD 1h trendline_break, 24h hold, $1k, maker fees
-//!   eth_1h_sf  ETHUSD 1h structure_filtered (VWAP+EMA gate)
-//!   sol_bh     SOLUSD $1k buy-and-hold benchmark
+//! Live wallet: BTC HODL 70/30 ±10% vs USD (no 1h signals). ETH/SOL 1h books
+//! trade the Kraken pile only. sol_bh is mark-only (no $1k live buy).
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -16,6 +14,7 @@ use chrono::Utc;
 use exchange_apiws::KrakenRestClient;
 use tracing::{info, warn};
 
+mod alloc;
 mod brains;
 mod discord;
 mod features;
@@ -69,7 +68,8 @@ Usage:
 
 Default is paper. Live refuses to start without the exact confirm string.
 Discord: set DISCORD_WEBHOOK_URL for daily (15:00 UTC), weekly (Mon), monthly (1st).
-Live reports fetch Kraken /0/private/Balance and print that first; the $1k books are strategy trackers.
+Live reports fetch Kraken /0/private/Balance first.
+Live sizing: BTC HODL 70/30 ±10%; ETH/SOL trade the wallet pile; no $1k buys.
 "
     );
     std::process::exit(2);
@@ -206,6 +206,24 @@ async fn one_cycle(
     let mut events = Vec::new();
     let mut new_bar = false;
 
+    let marks = fetch_marks(client).await.unwrap_or_default();
+    let btc_px = marks
+        .iter()
+        .find(|(p, _)| p == "XBTUSD")
+        .map(|(_, x)| *x)
+        .unwrap_or(0.0);
+    let wallet = if matches!(mode, Mode::Live | Mode::LiveDry) {
+        match live_gw {
+            Some(gw) => gw.balances().await.ok().map(|b| alloc::Wallet::from_balances(&b)),
+            None if live::keys_present() => match live::LiveKraken::from_env() {
+                Ok(gw) => gw.balances().await.ok().map(|b| alloc::Wallet::from_balances(&b)),
+                Err(_) => None,
+            },
+            None => None,
+        }
+    } else {
+        None
+    };
     for book in &mut state.books {
         let Some(bars) = bars_by_pair.get(&book.pair) else {
             continue;
@@ -221,45 +239,80 @@ async fn one_cycle(
             info!("{n}");
             events.push(n.clone());
         }
+        if book.strategy == "buy_hold" {
+            if let (Some(w), Some(p)) = (wallet.as_ref(), book.position.as_mut()) {
+                p.qty = w.sol;
+            }
+            continue;
+        }
         let opened = !before_pos && book.position.is_some();
         let closed = book.trades.len() > before_n;
         if matches!(mode, Mode::LiveDry | Mode::Live) && (opened || closed) {
-            if let Some(p) = &book.position {
-                let side = if p.side > 0 { "buy" } else { "sell" };
-                let msg = format!(
-                    "KRAKEN {} {} {} vol={:.6} px={:.4}",
-                    match mode {
-                        Mode::Live => "PLACE",
-                        _ => "WOULD PLACE",
-                    },
-                    side,
-                    book.pair,
-                    p.qty,
-                    p.entry
-                );
-                info!("{msg}");
-                events.push(msg);
-                if matches!(mode, Mode::Live) {
-                    if let Some(gw) = live_gw {
-                        match gw
-                            .place_limit(
-                                &book.pair,
-                                p.side,
-                                &format!("{:.8}", p.qty),
-                                &format!("{:.4}", p.entry),
-                            )
-                            .await
-                        {
-                            Ok(r) => info!("live order ok: {r}"),
-                            Err(e) => warn!("live order failed: {e:#}"),
+            let Some(w) = wallet.as_ref() else {
+                warn!("{}: no wallet snapshot — skipping live order", book.id);
+                continue;
+            };
+            let mark = marks
+                .iter()
+                .find(|(p, _)| p == &book.pair)
+                .map(|(_, x)| *x)
+                .unwrap_or(0.0);
+            let action = alloc::signal_action(
+                &book.strategy,
+                &book.pair,
+                opened,
+                closed,
+                book.position.as_ref().map(|p| p.side),
+                mark,
+                w,
+                btc_px,
+            );
+            match action {
+                alloc::LiveAction::None => {}
+                alloc::LiveAction::Skip(why) => {
+                    info!("{} live skip: {why}", book.id);
+                    events.push(format!("{} SKIP {why}", book.id));
+                    if opened {
+                        if let Some(p) = book.position.take() {
+                            book.fees_paid = (book.fees_paid - p.entry_fee).max(0.0);
                         }
                     }
+                }
+                alloc::LiveAction::Adopt { qty, .. } => {
+                    if let Some(p) = book.position.as_mut() {
+                        p.qty = qty;
+                    }
+                    info!("{} ADOPT inventory qty={qty:.8} (no buy)", book.id);
+                    events.push(format!("{} ADOPT {} qty={:.8}", book.id, book.pair, qty));
+                }
+                alloc::LiveAction::Buy { pair, qty, price } => {
+                    if let Some(p) = book.position.as_mut() {
+                        p.qty = qty;
+                    }
+                    place_live(mode, live_gw, &pair, 1, qty, price, &mut events).await;
+                }
+                alloc::LiveAction::Sell { pair, qty, price } => {
+                    place_live(mode, live_gw, &pair, -1, qty, price, &mut events).await;
                 }
             }
         }
     }
 
-    let marks = fetch_marks(client).await.unwrap_or_default();
+    if matches!(mode, Mode::Live | Mode::LiveDry) && new_bar {
+        if let Some(w) = wallet.as_ref() {
+            info!(
+                "wallet usd={:.2} btc={:.8} eth={:.8} sol={:.8} btc_w={:.1}% surplus=${:.2}",
+                w.usd,
+                w.btc,
+                w.eth,
+                w.sol,
+                100.0 * alloc::btc_weight(w, btc_px),
+                alloc::surplus_usd(w, btc_px)
+            );
+            maybe_btc_rebalance(&mut state, mode, live_gw, w, btc_px, &mut events).await;
+        }
+    }
+
     let mut kinds = Vec::new();
     if !*announced {
         kinds.push("startup".into());
@@ -363,9 +416,67 @@ async fn fetch_closed_1h(client: &KrakenRestClient, pair: &str) -> anyhow::Resul
     Ok(bars)
 }
 
+async fn place_live(
+    mode: Mode,
+    live_gw: Option<&live::LiveKraken>,
+    pair: &str,
+    side: i8,
+    qty: f64,
+    price: f64,
+    events: &mut Vec<String>,
+) {
+    let side_s = if side > 0 { "buy" } else { "sell" };
+    let vol = format!("{:.8}", alloc::floor_qty(qty));
+    let px = alloc::limit_price(pair, price);
+    let msg = format!(
+        "KRAKEN {} {side_s} {pair} vol={vol} px={px} (wallet-capped)",
+        match mode {
+            Mode::Live => "PLACE",
+            _ => "WOULD PLACE",
+        }
+    );
+    info!("{msg}");
+    events.push(msg);
+    if matches!(mode, Mode::Live) {
+        if let Some(gw) = live_gw {
+            match gw.place_limit(pair, side, &vol, &px).await {
+                Ok(r) => info!("live order ok: {r}"),
+                Err(e) => warn!("live order failed: {e:#}"),
+            }
+        }
+    }
+}
+
+async fn maybe_btc_rebalance(
+    state: &mut paper::State,
+    mode: Mode,
+    live_gw: Option<&live::LiveKraken>,
+    w: &alloc::Wallet,
+    btc_px: f64,
+    events: &mut Vec<String>,
+) {
+    let today = Utc::now().format("%Y-%m-%d").to_string();
+    if state.last_btc_rebalance == today {
+        return;
+    }
+    let Some(r) = alloc::btc_rebalance(w, btc_px) else {
+        return;
+    };
+    info!(
+        "BTC mix {:.1}% vs target {:.0}% ±{:.0} — rebalance {} {:.8}",
+        100.0 * alloc::btc_weight(w, btc_px),
+        100.0 * alloc::BTC_TARGET,
+        100.0 * alloc::BTC_BAND,
+        if r.side > 0 { "buy" } else { "sell" },
+        r.qty
+    );
+    place_live(mode, live_gw, r.pair, r.side, r.qty, r.price, events).await;
+    state.last_btc_rebalance = today;
+}
+
 async fn fetch_marks(client: &KrakenRestClient) -> anyhow::Result<Vec<(String, f64)>> {
     let mut out = Vec::new();
-    for pair in ["SOLUSD", "ETHUSD"] {
+    for pair in ["SOLUSD", "ETHUSD", "XBTUSD"] {
         let t = client
             .get_ticker(pair)
             .await

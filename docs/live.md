@@ -30,7 +30,7 @@ systemctl --user restart crypto-bot-live
 journalctl --user -u crypto-bot-live -n 40 --no-pager
 ```
 
-A restart reloads the binary and sends a Discord **startup** snapshot. It does **not** flatten Kraken. Existing books in `state.json` keep their positions; buy-hold will not re-enter if already long.
+A restart reloads the binary and sends a Discord **startup** snapshot. It does **not** flatten Kraken. BTC is never sold to match a flat book. ETH/SOL are only sold on a strategy **exit** (or a short signal that maps to selling inventory).
 
 ## Commands
 
@@ -55,19 +55,24 @@ Cadence: startup on process start; daily from 15:00 UTC; weekly Monday; monthly 
 
 ## How a cycle works
 
-1. Load `state.json`.
-2. Pull closed 1h OHLC for SOLUSD and ETHUSD (drop the still-forming bar).
-3. For each book, `step_book` on a **new** closed bar only: time stop (24h), 1.5×ATR stop, flip, or enter.
-4. If live and a book **opened** this bar, place a Kraken limit at the book entry (qty/price from the $1k notional).
-5. Save state. Log only on new bar or trade.
-
-`get_position` on the exchange adapter still returns flat. The **books** are the position source. Restarting does not query Kraken for fills.
+1. Load `state.json` and Kraken `Balance`.
+2. Pull closed 1h OHLC for SOLUSD, ETHUSD, and XBTUSD mark.
+3. For each signal book, `step_book` on a **new** closed bar only: time stop (24h), 1.5×ATR stop, flip, or enter.
+4. Map that to a **wallet-capped** live action:
+   - `buy_hold` (`sol_bh`): clamp qty to wallet SOL, **no order**.
+   - long enter + inventory ≥ min: **adopt** (no buy).
+   - long enter + no inventory: buy with USD **above** the 30% BTC+USD cash floor, if it clears Kraken min (ETH 0.001 / SOL 0.06).
+   - exit / short signal: **sell the ETH or SOL pile**, never more than the wallet.
+   - never open a spot short, never trade BTC on a 1h signal.
+5. On a new 1h bar, at most once per UTC day, rebalance BTC vs USD if weight is outside 60–80%.
+6. Save state. Log only on new bar or trade.
 
 ## Safety
 
 - Live will not start without the exact confirm string.
 - Do not run paper systemd and live together.
-- `sol_bh` size is `$1000 / entry`. That is not the SOL balance on the account unless a fill actually happened at that size.
+- Live orders are capped to the Kraken wallet. Paper-scale $1k books are trackers only.
+- BTC HODL is not dumped on restart. ETH/SOL are not dumped just because a book is flat.
 - Signal books stay flat until a 1h close prints an entry. Quiet logs for hours are normal.
 - zsh treats a leading `#` as a command if you paste comments. Use bash or drop the comment lines.
 

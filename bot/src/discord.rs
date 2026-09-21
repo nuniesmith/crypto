@@ -102,6 +102,8 @@ pub fn format_report(
                     }
                 }
                 lines.push(String::new());
+                lines.push("**policy** BTC HODL 70/30 ±10% of BTC+USD. ETH/SOL trade the wallet pile only. `sol_bh` is mark-only — no $1k buys.".into());
+                lines.push(String::new());
             }
             None => {
                 lines.push("**Kraken account**".into());
@@ -109,7 +111,7 @@ pub fn format_report(
                 lines.push(String::new());
             }
         }
-        lines.push("**strategy books** _(internal $1k each — not Kraken cash)_".into());
+        lines.push("**strategy books** _(paper-scale trackers — live orders are wallet-capped)_".into());
     }
     for b in &state.books {
         let px = marks
@@ -139,26 +141,28 @@ pub fn format_report(
             b.trades.len()
         ));
     }
-    let total: f64 = state
-        .books
-        .iter()
-        .map(|b| {
-            let px = marks
-                .iter()
-                .find(|(p, _)| p == &b.pair)
-                .map(|(_, x)| *x)
-                .unwrap_or(0.0);
-            b.equity(px)
-        })
-        .sum();
     lines.push(String::new());
-    lines.push(format!(
-        "combined equity `${:.2}` vs start `${:.0}`",
-        total,
-        crate::paper::NOTIONAL * state.books.len() as f64
-    ));
+    if !live {
+        let total: f64 = state
+            .books
+            .iter()
+            .map(|b| {
+                let px = marks
+                    .iter()
+                    .find(|(p, _)| p == &b.pair)
+                    .map(|(_, x)| *x)
+                    .unwrap_or(0.0);
+                b.equity(px)
+            })
+            .sum();
+        lines.push(format!(
+            "combined equity `${:.2}` vs start `${:.0}`",
+            total,
+            crate::paper::NOTIONAL * state.books.len() as f64
+        ));
+    }
     lines.push(if live {
-        "_SOL 1h trendline · ETH 1h VWAP+EMA filter · SOL buy-hold. LIVE Kraken limit orders. Strategy books are internal $1k trackers, not account cash._".into()
+        "_SOL 1h trendline · ETH 1h VWAP+EMA filter. BTC is HODL. Live limits use real Kraken balances, not $1k books._".into()
     } else {
         "_SOL 1h trendline · ETH 1h VWAP+EMA filter · SOL buy-hold. Maker tier-3 fees. Paper only — no exchange orders._".into()
     });
@@ -231,6 +235,7 @@ mod tests {
             last_daily: String::new(),
             last_weekly: String::new(),
             last_monthly: String::new(),
+            last_btc_rebalance: String::new(),
         }
     }
 
@@ -244,8 +249,8 @@ mod tests {
         assert!(body.contains("**Kraken account**  `$4871.00`"));
         assert!(body.contains("**USD** `4321.00`"));
         assert!(body.contains("**SOL** `5.0000`"));
-        assert!(body.contains("not Kraken cash"));
-        assert!(body.contains("internal $1k"));
+        assert!(body.contains("wallet pile"));
+        assert!(body.contains("no $1k buys"));
         let kraken_at = body.find("Kraken account").unwrap();
         let books_at = body.find("strategy books").unwrap();
         let paper_eq = body.find("equity `$").unwrap();

@@ -225,17 +225,27 @@ async fn one_cycle(
     // every price at 0.0 rather than stale. `Marks::complete()` is what the
     // policy checks before sizing anything off those zeros.
     let marks_snapshot = alloc::Marks::from_pairs(&marks);
-    let mut wallet = if matches!(mode, Mode::Live | Mode::LiveDry) {
-        match live_gw {
-            Some(gw) => gw.balances().await.ok().map(|b| alloc::Wallet::from_balances(&b)),
-            None if live::keys_present() => match live::LiveKraken::from_env() {
-                Ok(gw) => gw.balances().await.ok().map(|b| alloc::Wallet::from_balances(&b)),
-                Err(_) => None,
-            },
-            None => None,
-        }
-    } else {
-        None
+    // ONE gateway for every read this cycle makes.
+    //
+    // `live_gw` is only built for Mode::Live, so a dry run used to reach
+    // Kraken through a throwaway client created inline for the balance call
+    // and nowhere else. Anything added afterwards silently did nothing under
+    // --dry-run: the open-order check below was exactly that, so a dry run
+    // reported $91.99 of trade cash where live would compute $54.60 on the
+    // same account. A preview that does not preview is worse than none.
+    let owned_gw = match (live_gw, matches!(mode, Mode::Live | Mode::LiveDry)) {
+        (None, true) if live::keys_present() => live::LiveKraken::from_env().ok(),
+        _ => None,
+    };
+    let read_gw = live_gw.or(owned_gw.as_ref());
+
+    let mut wallet = match (matches!(mode, Mode::Live | Mode::LiveDry), read_gw) {
+        (true, Some(gw)) => gw
+            .balances()
+            .await
+            .ok()
+            .map(|b| alloc::Wallet::from_balances(&b)),
+        _ => None,
     };
 
     // Ask Kraken what its open orders have already claimed. Without this the
@@ -243,7 +253,7 @@ async fn one_cycle(
     // spoken for -- measured live at $37.38 held against a $120.41 balance.
     // A failure here leaves `usd_held` at 0, which OVERSTATES what is
     // spendable, so it is logged rather than passed over in silence.
-    if let (Some(w), Some(gw)) = (wallet.as_mut(), live_gw) {
+    if let (Some(w), Some(gw)) = (wallet.as_mut(), read_gw) {
         match gw.held_usd().await {
             Ok(held) => w.usd_held = held,
             Err(e) => warn!("open-order check failed ({e:#}) — sizing may overstate free USD"),

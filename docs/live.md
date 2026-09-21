@@ -44,6 +44,14 @@ A restart reloads the binary and sends a Discord **startup** snapshot. It does *
 
 `crypto-bot: command not found` means you used PATH. Use the script or `./bot/target/release/crypto-bot`.
 
+`crypto-bot live --dry-run` reads the real Kraken balance and the real open
+orders and places nothing. It goes through the **same gateway** live does, so
+what it prints is what live would do — that was not true at first, and a dry
+run reported $91.99 of trade cash where live computed $54.60 on the same
+account. Note `data_dir()` is baked from `CARGO_MANIFEST_DIR`, so a dry run
+started from this checkout writes the LIVE `state.json`: copy the tree
+elsewhere first.
+
 ## Discord
 
 Live body order:

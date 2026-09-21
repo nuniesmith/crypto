@@ -29,12 +29,54 @@ BINANCE_PAIR = {
     "ETHUSDT": "ETHUSDT",
     "SOLUSD": "SOLUSDT",
     "SOLUSDT": "SOLUSDT",
+    "XRPUSD": "XRPUSDT",
+    "AVAXUSD": "AVAXUSDT",
+    "NEARUSD": "NEARUSDT",
+    "TAOUSD": "TAOUSDT",
+    "XDGUSD": "DOGEUSDT",
+    "DOGEUSD": "DOGEUSDT",
+    "ADAUSD": "ADAUSDT",
+    "LINKUSD": "LINKUSDT",
+    "PEPEUSD": "PEPEUSDT",
+    "DOTUSD": "DOTUSDT",
+    "RENDERUSD": "RENDERUSDT",
+    "FETUSD": "FETUSDT",
+    "OPUSD": "OPUSDT",
+    "WIFUSD": "WIFUSDT",
+    "BONKUSD": "BONKUSDT",
+    "SHIBUSD": "SHIBUSDT",
+    "FLOKIUSD": "FLOKIUSDT",
+    "TRUMPUSD": "TRUMPUSDT",
+    "VIRTUALUSD": "VIRTUALUSDT",
+    "TURBOUSD": "TURBOUSDT",
+    "PUMPUSD": "PUMPUSDT",
 }
 LOCAL_PAIR = {
     "BTCUSDT": "XBTUSD",
     "ETHUSDT": "ETHUSD",
     "SOLUSDT": "SOLUSD",
+    "XRPUSDT": "XRPUSD",
+    "AVAXUSDT": "AVAXUSD",
+    "NEARUSDT": "NEARUSD",
+    "TAOUSDT": "TAOUSD",
+    "DOGEUSDT": "XDGUSD",
+    "ADAUSDT": "ADAUSD",
+    "LINKUSDT": "LINKUSD",
+    "PEPEUSDT": "PEPEUSD",
+    "DOTUSDT": "DOTUSD",
+    "RENDERUSDT": "RENDERUSD",
+    "FETUSDT": "FETUSD",
+    "OPUSDT": "OPUSD",
+    "WIFUSDT": "WIFUSD",
+    "BONKUSDT": "BONKUSD",
+    "SHIBUSDT": "SHIBUSD",
+    "FLOKIUSDT": "FLOKIUSD",
+    "TRUMPUSDT": "TRUMPUSD",
+    "VIRTUALUSDT": "VIRTUALUSD",
+    "TURBOUSDT": "TURBOUSD",
+    "PUMPUSDT": "PUMPUSD",
 }
+VISION_INTERVAL = {1: "1m", 5: "5m", 15: "15m", 60: "1h", 240: "4h"}
 
 _SESSION = requests.Session()
 _SESSION.headers.update({"User-Agent": "crypto-scalper/0.1 (research; binance-vision)"})
@@ -125,10 +167,10 @@ def _klines_from_zip(raw: bytes) -> pd.DataFrame:
     for c in ["open", "high", "low", "close", "volume", "quote_volume"]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
     df["count"] = pd.to_numeric(df["count"], errors="coerce").fillna(0).astype(int)
-    vol = df["volume"].replace(0, pd.NA)
-    df["vwap"] = (df["quote_volume"] / vol).astype(float)
+    qv = pd.to_numeric(df["quote_volume"], errors="coerce")
+    base = pd.to_numeric(df["volume"], errors="coerce").replace(0, float("nan"))
     typical = (df["high"] + df["low"] + df["close"]) / 3.0
-    df["vwap"] = df["vwap"].fillna(typical)
+    df["vwap"] = (qv / base).fillna(typical)
     return df.set_index("time")[["open", "high", "low", "close", "vwap", "volume", "count"]]
 
 
@@ -137,13 +179,18 @@ def _read_cached_zip(path: Path) -> pd.DataFrame:
 
 
 def fetch_binance_1m(pair: str, days: int = 400, interval: int = 1) -> pd.DataFrame:
-    if interval != 1:
-        raise ValueError("Binance Vision helper currently implements 1-minute only")
+    return fetch_binance_vision(pair, days=days, interval=interval)
+
+
+def fetch_binance_vision(pair: str, days: int = 400, interval: int = 1) -> pd.DataFrame:
+    if interval not in VISION_INTERVAL:
+        raise ValueError(f"Binance Vision interval must be one of {sorted(VISION_INTERVAL)}")
+    iv = VISION_INTERVAL[interval]
     symbol = _binance_symbol(pair)
     local = LOCAL_PAIR.get(symbol, pair.upper())
     end = datetime.now(timezone.utc).date()
     start = end - timedelta(days=days)
-    raw_dir = DATA_DIR / "raw" / "binance" / symbol / "1m"
+    raw_dir = DATA_DIR / "raw" / "binance" / symbol / iv
     frames: list[pd.DataFrame] = []
 
     months = _month_range(start, end)
@@ -151,46 +198,43 @@ def fetch_binance_1m(pair: str, days: int = 400, interval: int = 1) -> pd.DataFr
         year, month = (int(x) for x in ym.split("-"))
         is_current = (year, month) == (end.year, end.month)
         if not is_current:
-            url = f"{BINANCE_VISION}/monthly/klines/{symbol}/1m/{symbol}-1m-{ym}.zip"
-            dest = raw_dir / f"{symbol}-1m-{ym}.zip"
-            print(f"  {symbol} monthly {ym} …", flush=True)
+            url = f"{BINANCE_VISION}/monthly/klines/{symbol}/{iv}/{symbol}-{iv}-{ym}.zip"
+            dest = raw_dir / f"{symbol}-{iv}-{ym}.zip"
+            print(f"  {symbol} {iv} monthly {ym} …", flush=True)
             if not _download(url, dest):
-                print(f"    skip (not published)")
+                print("    skip (not published)")
                 continue
             frames.append(_read_cached_zip(dest))
             continue
-        # Current month is only published as daily zips.
         d = date(year, month, 1)
         n_daily = 0
         while d <= end:
             ds = d.isoformat()
-            url = f"{BINANCE_VISION}/daily/klines/{symbol}/1m/{symbol}-1m-{ds}.zip"
-            dest = raw_dir / f"{symbol}-1m-{ds}.zip"
+            url = f"{BINANCE_VISION}/daily/klines/{symbol}/{iv}/{symbol}-{iv}-{ds}.zip"
+            dest = raw_dir / f"{symbol}-{iv}-{ds}.zip"
             ok = _download(url, dest)
             if ok:
                 frames.append(_read_cached_zip(dest))
                 n_daily += 1
             d += timedelta(days=1)
-        print(f"  {symbol} daily {ym}: {n_daily} day files", flush=True)
+        print(f"  {symbol} {iv} daily {ym}: {n_daily} day files", flush=True)
 
     if not frames:
-        raise RuntimeError(f"No Binance 1m files downloaded for {symbol}")
+        raise RuntimeError(f"No Binance {iv} files downloaded for {symbol}")
 
     df = normalize_ohlcv(pd.concat(frames))
     df = df[df.index >= pd.Timestamp(start, tz="UTC")]
     from .store import pair_path
 
-    # Replace the cache (do not merge leftover Kraken 12h API bars into USDT 1m).
-    path = pair_path(local, 1)
+    path = pair_path(local, interval)
     path.parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(path)
-    full = df
-    rep = coverage_report(full, 1)
+    rep = coverage_report(df, interval)
     print(
         f"{local}: {rep['bars']:,} bars  {rep['span_days']:.1f}d  "
         f"cov={rep['coverage_pct']}%  {rep['from']} → {rep['to']}  → {path}"
     )
-    return full
+    return df
 
 
 def fetch_history(pairs: list[str], days: int = 400, interval: int = 1) -> None:
@@ -198,6 +242,6 @@ def fetch_history(pairs: list[str], days: int = 400, interval: int = 1) -> None:
     print(f"Fetching ≥{days}d of {interval}m bars via Binance Vision → {DATA_DIR}")
     for p in pairs:
         try:
-            fetch_binance_1m(p, days=days, interval=interval)
+            fetch_binance_vision(p, days=days, interval=interval)
         except Exception as exc:
             print(f"FAILED {p}: {exc}")

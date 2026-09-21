@@ -89,14 +89,21 @@ def resample_ohlcv(df: pd.DataFrame, minutes: int) -> pd.DataFrame:
     )
     if "vwap" in df.columns and "volume" in df.columns:
         pv = (df["vwap"] * df["volume"]).resample(f"{minutes}min").sum()
-        vol = df["volume"].resample(f"{minutes}min").sum().replace(0, pd.NA)
-        ohlc["vwap"] = (pv / vol).astype(float)
+        vol = df["volume"].resample(f"{minutes}min").sum().replace(0, float("nan"))
+        typical = (ohlc["high"] + ohlc["low"] + ohlc["close"]) / 3.0
+        ohlc["vwap"] = (pv / vol).fillna(typical)
     ohlc = ohlc.dropna(subset=["open", "high", "low", "close"])
     return normalize_ohlcv(ohlc)
 
 
 def load_ohlcv(pair: str, days: int | None = None, interval: int = 1) -> pd.DataFrame:
     path = pair_path(pair, interval)
+    if not path.exists() and interval == 1:
+        for fallback in (15, 60):
+            alt = pair_path(pair, fallback)
+            if alt.exists():
+                path = alt
+                break
     if not path.exists():
         raise FileNotFoundError(
             f"No cache for {pair}. Run: crypto fetch-history --pair {pair} --days {days or 365}"

@@ -1,82 +1,105 @@
-# crypto — 1-minute Kraken spot scalper (BTC / ETH / SOL)
+# crypto — Kraken 1h SOL/ETH bot + fee-aware research
 
-Fee-aware research + live-ready skeleton for high-frequency spot scalping on Kraken.
-Architecture deliberately mirrors the futures walk-forward optimizer so we can reuse
-the same study discipline, risk-policy separation, and Optuna workflow.
+What is **running now** (oryx, `systemd --user`): **LIVE Kraken**, 1-hour bars, SOL and ETH only.
 
-## Why fees dominate
+This repo is not a 1-minute scalp. Walk-forwards after Kraken fees killed 1m/15m. The live sleeves came from a 1h/4h structure-break study versus buy-and-hold.
 
-Kraken Pro spot (July 2026+ schedule):
+| Layer | Role |
+|---|---|
+| `bot/` | Rust paper/live stepper (`exchange-apiws` + `indicators-ta` + `rustrade-framework`) |
+| `src/crypto/` | Python fetch, simulator, Optuna, walk-forward / direction studies |
+| `scripts/` | `run-bot.sh` + systemd user units |
+| `data/` | Parquet cache + study reports (gitignored) |
 
-| Tier | 30-day vol or AoP | Maker | Taker |
-|------|-------------------|-------|-------|
-| 1    | $0                | 0.40 %| 0.80 %|
-| 3    | $10 k / $20 k     | 0.22 %| 0.38 %|
-| 6    | $100 k / $200 k   | 0.12 %| 0.25 %|
-| 12   | $10 M / $10 M     | 0.00 %| 0.10 %|
+## What is live
 
-A 1-minute scalp that captures 0.15 % of price movement is **net negative** at
-retail tiers if both legs are taker. The back-tester therefore:
+Host: **oryx**. Unit: `crypto-bot-live.service` (user systemd, survives logout). Paper unit stays **off** — both processes share `data/paper/state.json`.
 
-* charges realistic maker/taker percentages (configurable per leg),
-* supports “maker-first” entry (limit at signal price, timeout → cancel or market),
-* requires positive expectancy **after** fees before a study is accepted.
+Command actually executed:
 
-## Core signal (your TradingView script)
+```text
+./bot/target/release/crypto-bot live --confirm I_UNDERSTAND_REAL_MONEY --loop
+```
 
-`pine/vwap_ema9.pine` — session VWAP + EMA(9) with optional smoothing / Bollinger.
-Strategies below treat VWAP as the mean and EMA9 as short-term momentum / filter.
+via `./scripts/run-bot.sh live`.
 
-## Quick start
+Three **internal $1k books** (strategy trackers, not Kraken cash):
+
+| Book | Pair | Rule | Hold |
+|---|---|---|---|
+| `sol_1h_tl` | SOLUSD | `trendline_break` | 24 × 1h |
+| `eth_1h_sf` | ETHUSD | `structure_filtered` (VWAP+EMA gate) | 24 × 1h |
+| `sol_bh` | SOLUSD | buy-and-hold benchmark | until flattened |
+
+Loop wakes every 60s and **only acts on a new closed 1h bar**. Live path places Kraken **limit** orders. Fees in the books: Kraken Pro tier-3 maker 0.22% + 1 bp slip (taker 0.38% if used).
+
+Discord (`DISCORD_WEBHOOK_URL`): startup, daily ~15:00 UTC, weekly Monday, monthly 1st. Live reports fetch `POST /0/private/Balance` and print the **real Kraken account first**. The $1k books are labeled as internal trackers.
+
+Not in the live bot: BTC, XRP, FET, TRUMP, memes, forex. See [docs/research.md](docs/research.md).
+
+Known gap: the books are the source of truth for position. `sol_bh` long size is the internal $1k mark, not necessarily the SOL sitting on Kraken.
+
+## Operate (oryx)
+
+User units — no `sudo systemctl`. Binary is not on `PATH`.
+
+```bash
+cd ~/github/crypto
+git pull
+cargo build --release --manifest-path bot/Cargo.toml
+systemctl --user daemon-reload
+systemctl --user disable --now crypto-bot-paper   # never run next to live
+systemctl --user enable --now crypto-bot-live
+systemctl --user status crypto-bot-live
+journalctl --user -u crypto-bot-live -f
+./scripts/run-bot.sh status
+./scripts/run-bot.sh report
+```
+
+`.env` (not committed):
+
+```
+KRAKEN_API_KEY=...
+KRAKEN_API_SECRET=...
+DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
+```
+
+Live refuses to start without `--confirm I_UNDERSTAND_REAL_MONEY` (the launcher embeds that). Full runbook: [docs/live.md](docs/live.md).
+
+## Research CLI
 
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
-cp .env.example .env          # only needed for live keys
 
-# Fetch ~30 days of 1-minute bars (public API, no key)
-.venv/bin/crypto fetch --pair XBTUSD ETHUSD SOLUSD --days 30
+# ≥1y history (Binance Vision). Kraken 1m public OHLC is ~12h.
+.venv/bin/crypto fetch-history --pair XBTUSD ETHUSD SOLUSD --days 400
+.venv/bin/crypto fetch-history --pair XRPUSD AVAXUSD --days 400 --interval 15
 
-# Run a baseline mean-reversion study
-.venv/bin/crypto research --pair XBTUSD --days 14
-
-# Optuna tune (fee-aware)
-.venv/bin/crypto optimize --pair XBTUSD --trials 200 --fee-tier 3
+.venv/bin/crypto direction --pair XBTUSD ETHUSD SOLUSD
+.venv/bin/crypto study --pair SOLUSD --interval 60 --days 365 --holdout-days 60
+.venv/bin/crypto status
 ```
 
-Data lands in `data/` (parquet + sqlite cache). Studies are resume-able.
+Studies write `data/studies/` (gitignored). Conclusions that decided the live books: [docs/research.md](docs/research.md).
 
-## Package layout
+## Layout
 
 ```
-src/crypto/
-  data/          # Kraken public OHLC + local cache
-  features/      # VWAP, EMA, ATR, session flags (static + dynamic)
-  strategies/    # VWAP mean-reversion, EMA cross, breakout scalps
-  sim/           # bar-by-bar simulator with maker/taker fees & slippage
-  opt/           # Optuna search, walk-forward, metrics
-pine/            # TradingView indicators (your VWAP+EMA9 + future alerts)
+bot/src/          Rust bot (paper stepper is the running loop; live places limits)
+src/crypto/       Python research
+  data/           Kraken OHLC + Binance Vision history
+  features/       VWAP, EMA, ATR
+  strategies/     trendline, structure, range, VWAP-MR, EMA
+  sim/            fee-aware replay
+  opt/            study / direction / Optuna
+scripts/          run-bot.sh, systemd user units
+docs/             live runbook + research conclusions
+pine/             VWAP+EMA9 as a *filter*, not a 1m entry
 ```
 
-## Re-used ideas from the futures repo
-
-* Static features computed once, dynamic features per trial.
-* Risk policy is **not** searchable (account size, max risk %, daily halt).
-* Locked hold-out + baseline comparison before export.
-* Study schema versioning so parameter-space changes invalidate old trials.
-* Commission / slippage applied on every fill; PnL is always net.
-
-## Next steps (in rough priority)
-
-1. Solidify 1 m data pipeline + gap handling.
-2. Implement 2–3 fee-robust scalp rules and unit-test the simulator.
-3. Walk-forward Optuna with realistic fee tiers.
-4. Export best params → Pine alerts + thin Python live runner (ccxt or raw REST).
-5. Paper-trade on Kraken, then size up only after live expectancy matches back-test.
+Crates (crates.io / nuniesmith): `exchange-apiws` 0.11 (Kraken), `indicators-ta` 0.3, `rustrade-framework` 0.5.2.
 
 ## Disclaimer
 
-This is research code. Crypto markets are 24/7, highly competitive, and fee
-drag kills most high-frequency retail strategies. Never risk capital you cannot
-afford to lose. Past performance (even after fees) is not indicative of future
-results.
+Research plus a small live Kraken bot. Markets are 24/7; fees kill most short-horizon retail strategies. Never risk money you cannot afford to lose. Past net-of-fee results are not a forecast.

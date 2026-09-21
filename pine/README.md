@@ -1,7 +1,7 @@
-# TradingView scripts
+# TradingView
 
-- `vwap_ema9.pine` — your session VWAP + EMA9 indicator (optional smoothing / Bollinger).
-  Use this as the visual and alert foundation for the Python strategies.
+`vwap_ema9.pine` — session VWAP + EMA9 (optional smoothing / Bollinger).
 
-Future: alert-enabled versions that emit the same entry/exit signals the
-simulator uses, so live TradingView alerts stay in lock-step with research.
+This is a **visual / filter**, not the live entry. Live entries are 1h `trendline_break` (SOL) and `structure_filtered` (ETH, VWAP+EMA gate). See [docs/research.md](../docs/research.md).
+
+1m VWAP mean-reversion was tested and is net-negative after Kraken fees. Do not alert-trade it.

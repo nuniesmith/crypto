@@ -68,7 +68,14 @@ def _run(sf: StaticFeatures, strategy: str, fee_tier: int, hold_bars: int, maker
 
 def _load_pair(pair: str, days: int, interval: int, data_dir: Path | None = None) -> pd.DataFrame:
     if data_dir is not None:
-        path = data_dir / f"{pair}_1m.parquet"
+        path = None
+        for iv in (1, 15, 60):
+            cand = data_dir / f"{pair}_{iv}m.parquet"
+            if cand.exists():
+                path = cand
+                break
+        if path is None:
+            raise FileNotFoundError(f"no parquet for {pair} in {data_dir}")
         df = normalize_ohlcv(pd.read_parquet(path))
         if days is not None:
             cutoff = df.index.max() - pd.Timedelta(days=days)
@@ -90,6 +97,7 @@ def run_direction(
     holdout_days: int = 60,
     fee_tier: int = 3,
     folds: int = 6,
+    pairs: list[str] | None = None,
 ) -> Path:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     out_dir = DATA_DIR / "studies"
@@ -108,15 +116,20 @@ def run_direction(
             "not a 1m entry. Compared to buy-and-hold on the same window. "
             "1m Binance USDT series; Kraken native H1 replay is a separate block."
         ),
+        "pairs": list(pairs or PAIRS),
         "binance": {},
         "kraken_native": {},
         "recommendation": {},
     }
+    pairs = list(pairs or PAIRS)
 
-    print(f"=== direction study  {days}d holdout={holdout_days}d  maker tier {fee_tier} ===")
+    print(
+        f"=== direction study  {', '.join(pairs)}  {days}d holdout={holdout_days}d  "
+        f"maker tier {fee_tier} ==="
+    )
     report["binance"] = _block(
         label="binance_year",
-        pairs=PAIRS,
+        pairs=pairs,
         days=days,
         holdout_days=holdout_days,
         fee_tier=fee_tier,
@@ -125,12 +138,15 @@ def run_direction(
         intervals=INTERVALS,
     )
     kraken_dir = DATA_DIR / "kraken_native"
-    if (kraken_dir / "XBTUSD_1m.parquet").exists():
+    native_pairs = [
+        p for p in pairs if (kraken_dir / f"{p}_1m.parquet").exists()
+    ]
+    if native_pairs:
         print("\n=== Kraken-native H1 2026 replay ===")
         # ~181 calendar days in the native cache; 45d holdout ≈ last quarter of H1
         report["kraken_native"] = _block(
             label="kraken_h1",
-            pairs=PAIRS,
+            pairs=native_pairs,
             days=200,
             holdout_days=45,
             fee_tier=fee_tier,
@@ -139,7 +155,7 @@ def run_direction(
             intervals=[60, 240],
         )
     else:
-        print("No data/kraken_native — skipping venue replay")
+        print("No data/kraken_native for these pairs — skipping venue replay")
 
     rec = _recommend(report)
     report["recommendation"] = rec
@@ -170,7 +186,11 @@ def _block(
     loaded: dict[tuple[str, int], tuple[StaticFeatures, int, int]] = {}
 
     for pair in pairs:
-        df1 = _load_pair(pair, days=days, interval=1, data_dir=data_dir)
+        try:
+            df1 = _load_pair(pair, days=days, interval=1, data_dir=data_dir)
+        except FileNotFoundError as e:
+            print(f"  skip {pair}: {e}")
+            continue
         for interval in intervals:
             df = resample_ohlcv(df1, interval) if interval > 1 else df1
             cov = coverage_report(df, interval)
@@ -223,6 +243,8 @@ def _block(
     wf_rows = []
     for pair in pairs:
         for interval in wf_iv:
+            if (pair, interval) not in loaded:
+                continue
             sf, hold_i, _ = loaded[(pair, interval)]
             edges = np.linspace(0, hold_i, folds + 1, dtype=int)
             min_test = max(20, 200 // max(interval // 15, 1))

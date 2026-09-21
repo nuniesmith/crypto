@@ -10,7 +10,7 @@ from pathlib import Path
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="crypto",
-        description="1-minute Kraken spot scalper — fetch, research, optimize",
+        description="Kraken research CLI — history, fee-aware study/direction, paper bot launcher",
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
@@ -21,11 +21,11 @@ def main(argv: list[str] | None = None) -> int:
 
     p_hist = sub.add_parser(
         "fetch-history",
-        help="Download ≥1 year of 1-minute bars (Binance Vision; Kraken API cannot go that far)",
+        help="Download ≥1 year of OHLCV via Binance Vision (Kraken public 1m is ~12h)",
     )
     p_hist.add_argument("--pair", nargs="+", default=["XBTUSD", "ETHUSD", "SOLUSD"])
     p_hist.add_argument("--days", type=int, default=400, help="Look-back days (default 400 ≈ 13 months)")
-    p_hist.add_argument("--interval", type=int, default=1, help="Minutes (1 only for now)")
+    p_hist.add_argument("--interval", type=int, default=1, help="Bar minutes (1, 15, 60, 240)")
 
     p_imp = sub.add_parser("import-ohlcvt", help="Import Kraken official OHLCVT CSV into data/*.parquet")
     p_imp.add_argument("path", help="Directory or single CSV with Kraken OHLCVT files")
@@ -63,6 +63,7 @@ def main(argv: list[str] | None = None) -> int:
         "direction",
         help="Clock-time 15m/1h/4h study: VWAP+EMA filter, vs buy-hold, Kraken-native replay",
     )
+    p_dir.add_argument("--pair", nargs="+", default=["XBTUSD", "ETHUSD", "SOLUSD"])
     p_dir.add_argument("--days", type=int, default=365)
     p_dir.add_argument("--holdout-days", type=int, default=60)
     p_dir.add_argument("--folds", type=int, default=6)
@@ -125,6 +126,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "direction":
         from crypto.opt.direction import run_direction
         run_direction(
+            pairs=args.pair,
             days=args.days,
             holdout_days=args.holdout_days,
             folds=args.folds,

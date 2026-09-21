@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "crypto-scalper"
 version = "0.1.0"
-description = "1-minute spot BTC/ETH/SOL scalper for Kraken — VWAP+EMA strategies, fee-aware backtest & Optuna"
+description = "Kraken 1h SOL/ETH research + paper/live bot — fee-aware walk-forward, not 1m scalps"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MPL-2.0" }

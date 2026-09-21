@@ -71,34 +71,33 @@ pub struct Policy {
 impl Policy {
     /// What the bot actually runs.
     pub const LIVE: Policy = Policy { trade_sleeve: TRADE_SLEEVE_ENABLED, core_share: CORE_SHARE };
-    /// The configuration the sleeves ran under until 2026-09-21. Kept so
-    /// that behaviour stays under test while it is switched off.
-    pub const WITH_SLEEVES: Policy = Policy { trade_sleeve: true, core_share: CORE_SHARE };
+    /// Sleeves off: the whole BTC+USD balance is the hold, ETH/SOL frozen.
+    /// Kept tested so switching to it is not a leap into cold code.
+    pub const HOLD_ONLY: Policy = Policy { trade_sleeve: false, core_share: 1.0 };
 }
 
 /// Whether the ETH/SOL 1h books may touch the wallet at all.
 ///
-/// **Off since 2026-09-21.** The sleeves lost to buy-and-hold on the 60-day
-/// holdout by $325 (SOL) and $280 (ETH) on a $1000 book, and ZERO of the 18
-/// cells in that run's leaders table beat BH — see docs/research.md. The
-/// repo's own gate is "a green holdout that loses to BH or fails WF is not
-/// an add-to-live"; both sleeves pass the WF half and fail the BH half, and
-/// the gate is an AND.
-///
-/// The books keep STEPPING with this off. They just never reach the wallet.
-/// That is deliberate: every bar they record is out-of-sample evidence
-/// about whether the strategy works, collected at no risk, which is worth
-/// more than deleting them and starting the question over later.
-///
-/// Turning this back on is a deliberate edit, and should follow a run where
-/// a sleeve actually clears the gate rather than a good week.
-pub const TRADE_SLEEVE_ENABLED: bool = false;
+/// On, but small — see `CORE_SHARE`. Set this to false to freeze ETH/SOL
+/// entirely (`Policy::HOLD_ONLY` is the same thing, and stays tested).
+pub const TRADE_SLEEVE_ENABLED: bool = true;
 
-/// Share of the whole account held as the BTC+USD sleeve when the trade
-/// sleeve IS enabled; the rest is trading capital. Operator's call,
-/// 2026-09-21. Unused while `TRADE_SLEEVE_ENABLED` is false — see
-/// `hold_base_usd`.
-pub const CORE_SHARE: f64 = 0.50;
+/// Share of the whole account held as the BTC+USD sleeve; the rest is
+/// trading capital for the ETH/SOL 1h books.
+///
+/// **0.80 since 2026-09-21, cut from 0.50.** The sleeves lost to
+/// buy-and-hold on the 60-day holdout by $325 (SOL) and $280 (ETH) on a
+/// $1000 book, and ZERO of the 18 cells in that run's leaders table beat BH
+/// — see docs/research.md. They captured roughly 22% of the bull move.
+///
+/// So this is a bet size on a signal that failed the repo's own gate, not
+/// an allocation to a proven edge. 20% is chosen as tuition: large enough
+/// that live results mean something, small enough that if the sleeve again
+/// captures a fifth of a rally the drag is a few percent of the account.
+///
+/// Raising it should follow a run where a sleeve actually clears the gate
+/// — beats buy-and-hold AND survives walk-forward — not a good week.
+pub const CORE_SHARE: f64 = 0.80;
 /// BTC's share WITHIN the hold sleeve. 0.70 × 0.50 = 35% of the account.
 pub const BTC_TARGET: f64 = 0.70;
 /// Drift allowed before rebalancing, in points of the hold sleeve — so ±10
@@ -442,9 +441,13 @@ pub fn signal_action(
 mod tests {
     use super::*;
 
-    /// These assert the sleeve-ON behaviour. It is switched off live, and
-    /// stays tested here so re-arming is not a leap into cold code.
-    const P: Policy = Policy::WITH_SLEEVES;
+    /// A FIXED 50/50 split, deliberately not `CORE_SHARE`. These tests
+    /// assert MECHANICS — adopt inventory, exit sells the pile, a deposit
+    /// is absorbed, the hold's cash is never spent on a signal — and none
+    /// of that depends on the share. Pinning the number here means retuning
+    /// the live sleeve size does not break a pile of unrelated tests and
+    /// tempt someone into "fixing" them by loosening the assertion.
+    const P: Policy = Policy { trade_sleeve: true, core_share: 0.50 };
 
     /// Prices near the live ones on 2026-09-21.
     fn marks() -> Marks {
@@ -771,7 +774,8 @@ mod tests {
 mod held_tests {
     use super::*;
 
-    const P: Policy = Policy::WITH_SLEEVES;
+    /// Fixed split, same reasoning as `tests::P` above.
+    const P: Policy = Policy { trade_sleeve: true, core_share: 0.50 };
 
     fn marks() -> Marks {
         Marks { btc: 84_594.0, eth: 2_692.0, sol: 115.0 }
@@ -846,11 +850,12 @@ mod held_tests {
 }
 
 #[cfg(test)]
-mod sleeves_off_tests {
+mod hold_only_tests {
     use super::*;
 
-    /// The policy the bot actually runs since 2026-09-21.
-    const P: Policy = Policy::LIVE;
+    /// Not what runs — `Policy::HOLD_ONLY` is the freeze-everything option.
+    /// Tested so choosing it later is not a leap into cold code.
+    const P: Policy = Policy::HOLD_ONLY;
 
     fn marks() -> Marks {
         Marks { btc: 84_594.0, eth: 2_692.0, sol: 115.0 }
@@ -869,8 +874,8 @@ mod sleeves_off_tests {
     }
 
     #[test]
-    fn the_live_policy_really_is_off() {
-        assert!(!P.trade_sleeve, "LIVE must have the trade sleeve disabled");
+    fn hold_only_really_is_off() {
+        assert!(!P.trade_sleeve);
     }
 
     #[test]
@@ -954,14 +959,95 @@ mod sleeves_off_tests {
     }
 
     #[test]
-    fn switching_the_sleeve_back_on_changes_the_answer() {
-        // Guards against the flag being wired somewhere it does not actually
-        // matter: the two policies must disagree about this wallet.
+    fn the_two_policies_disagree_about_this_wallet() {
+        // Guards against the flag being wired somewhere it does not matter.
         let w = live();
         assert_ne!(
-            targets(&w, marks(), Policy::LIVE).btc,
-            targets(&w, marks(), Policy::WITH_SLEEVES).btc
+            targets(&w, marks(), Policy::HOLD_ONLY).btc,
+            targets(&w, marks(), Policy::LIVE).btc
         );
-        assert!(trade_cash_usd(&w, marks(), Policy::WITH_SLEEVES) > 0.0);
+        assert!(trade_cash_usd(&w, marks(), Policy::LIVE) > 0.0);
+        assert_eq!(trade_cash_usd(&w, marks(), Policy::HOLD_ONLY), 0.0);
+    }
+}
+
+#[cfg(test)]
+mod live_split_tests {
+    use super::*;
+
+    /// The real configuration. Unlike the mechanics modules above, these
+    /// assert the ACTUAL numbers the wallet will be steered to, so retuning
+    /// the sleeve size is supposed to land here and nowhere else.
+    const P: Policy = Policy::LIVE;
+
+    fn marks() -> Marks {
+        Marks { btc: 84_594.0, eth: 2_692.0, sol: 115.0 }
+    }
+
+    fn live() -> Wallet {
+        Wallet {
+            usd: 120.4135,
+            usd_held: 0.0,
+            btc: 0.00078514,
+            eth: 0.0010000036,
+            sol: 0.0000093939,
+        }
+    }
+
+    #[test]
+    fn the_sleeve_is_on_and_small() {
+        assert!(P.trade_sleeve);
+        assert!((P.core_share - 0.80).abs() < 1e-9, "hold should be 80% of the account");
+    }
+
+    #[test]
+    fn the_split_is_eighty_twenty_of_the_whole_account() {
+        let w = live();
+        let t = targets(&w, marks(), P);
+        // BTC is 70% of the 80% hold = 56% of the account; its cash 24%;
+        // the trade sleeve the remaining 20%.
+        assert!((t.btc / t.total - 0.56).abs() < 0.005, "btc share {}", t.btc / t.total);
+        assert!(
+            (t.hold_cash / t.total - 0.24).abs() < 0.005,
+            "hold cash share {}",
+            t.hold_cash / t.total
+        );
+        let deployed = w.eth * marks().eth + w.sol * marks().sol;
+        assert!(
+            ((t.trade_cash + deployed) / t.total - 0.20).abs() < 0.005,
+            "trade sleeve share {}",
+            (t.trade_cash + deployed) / t.total
+        );
+    }
+
+    #[test]
+    fn the_strategy_still_has_money_to_work_with() {
+        // The whole point of a nonzero sleeve. If this is ever zero the
+        // sleeve is on in name only and the bot quietly stops trading while
+        // looking healthy -- the trap that made the first version of the
+        // two-sleeve policy wrong.
+        let cash = trade_cash_usd(&live(), marks(), P);
+        assert!(cash > 30.0, "trade cash {cash}");
+        // ...and comfortably clears Kraken's minimums.
+        assert!(cash > MIN_SOL * marks().sol, "cannot even buy one SOL lot");
+        assert!(cash > MIN_ETH * marks().eth);
+    }
+
+    #[test]
+    fn moving_to_twenty_percent_buys_btc_not_sells_it() {
+        // Cutting the sleeve from 50% to 20% moves money INTO the hold, so
+        // the first live action is a buy. Worth pinning: the previous
+        // config's first action was a sell, and confusing the two would be
+        // a real-money surprise.
+        let w = live();
+        let r = btc_rebalance(&w, marks(), P).expect("out of band after the cut");
+        assert_eq!(r.side, 1);
+        let spend = r.qty * r.price;
+        assert!((30.0..50.0).contains(&spend), "spend={spend}");
+        let mut after = w.clone();
+        after.btc += r.qty;
+        after.usd -= spend;
+        assert!(btc_rebalance(&after, marks(), P).is_none(), "should settle in band");
+        assert!(trade_cash_usd(&after, marks(), P) > 30.0, "and leave the sleeve funded");
     }
 }

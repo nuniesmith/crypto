@@ -61,10 +61,14 @@ Cadence: startup on process start; daily from 15:00 UTC; weekly Monday; monthly 
 4. Map that to a **wallet-capped** live action:
    - `buy_hold` (`sol_bh`): clamp qty to wallet SOL, **no order**.
    - long enter + inventory ≥ min: **adopt** (no buy).
-   - long enter + no inventory: buy with USD **above** the 30% BTC+USD cash floor, if it clears Kraken min (ETH 0.001 / SOL 0.06).
+   - long enter + no inventory: buy with the **trade sleeve's** cash, if it clears Kraken min (ETH 0.001 / SOL 0.06). That cash is capped both by the sleeve's own headroom and by what is left once the hold sleeve's dollars are reserved, so a signal can never eat the BTC reserve.
    - exit / short signal: **sell the ETH or SOL pile**, never more than the wallet.
    - never open a spot short, never trade BTC on a 1h signal.
-5. On a new 1h bar, at most once per UTC day, **sell** BTC if BTC is above 80% of BTC+USD. It never auto-buys BTC (so selling ETH/SOL does not get swept into more bitcoin).
+5. On a new 1h bar, at most once per UTC day, rebalance BTC **in either
+   direction** when it is more than ±10 points off 70% of the hold sleeve.
+   Strategy orders are sized first, housekeeping second. The daily slot is
+   only consumed when an order is actually accepted — a rejected one used to
+   mark the day done and leave the account out of band for another 24h.
 6. Save state. Log only on new bar or trade.
 
 ## Safety
@@ -73,6 +77,8 @@ Cadence: startup on process start; daily from 15:00 UTC; weekly Monday; monthly 
 - Do not run paper systemd and live together.
 - Live orders are capped to the Kraken wallet. Paper-scale $1k books are trackers only.
 - BTC HODL is not dumped on restart. ETH/SOL are not dumped just because a book is flat.
+- **Unfilled limit orders are cancelled after 10 minutes.** Kraken limits never expire and `place_order` takes no `expiretm`, so an order priced at the last trade could sit forever holding USD that `Balance` still reports as spendable — the next cycle would then size against money already reserved. Only txids this bot recorded are cancelled; orders placed by hand in the Kraken UI are left alone.
+- A rebalance needs a **complete** set of marks. `fetch_marks` returns an empty vec on error, so a ticker outage leaves prices at 0.0, which understates the account and every target — the policy refuses rather than sizing a real order off that.
 - Signal books stay flat until a 1h close prints an entry. Quiet logs for hours are normal.
 - zsh treats a leading `#` as a command if you paste comments. Use bash or drop the comment lines.
 

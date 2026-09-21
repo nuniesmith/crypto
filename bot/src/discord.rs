@@ -236,6 +236,7 @@ mod tests {
             last_weekly: String::new(),
             last_monthly: String::new(),
             last_btc_rebalance: String::new(),
+            pending_orders: Vec::new(),
         }
     }
 

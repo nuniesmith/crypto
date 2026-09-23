@@ -19,6 +19,7 @@ mod brains;
 mod discord;
 mod features;
 mod kraken_src;
+mod ledger;
 mod live;
 mod paper;
 mod paper_ex;
@@ -264,6 +265,9 @@ async fn one_cycle(
     // the loop below holds a mutable borrow of `state.books` for its whole
     // body, so the state struct cannot be touched again until it ends.
     let mut pending: Vec<paper::PendingOrder> = Vec::new();
+    // Same reason as `pending`: the loop below holds `state.books` borrowed
+    // for its whole body, so `state.live` cannot be touched until it ends.
+    let mut adopted: Vec<(String, f64, f64)> = Vec::new();
     for book in &mut state.books {
         let Some(bars) = bars_by_pair.get(&book.pair) else {
             continue;
@@ -281,9 +285,14 @@ async fn one_cycle(
             events.push(n.clone());
         }
         if book.strategy == "buy_hold" {
-            if let (Some(w), Some(p)) = (wallet.as_ref(), book.position.as_mut()) {
-                p.qty = w.sol;
-            }
+            // Deliberately does NOTHING to the position. This used to set
+            // `p.qty = w.sol`, which replaced a $1,000 simulated hold with
+            // whatever SOL the wallet happened to hold -- 0.0000094 of a coin
+            // -- and pinned the buy-and-hold benchmark at a flat -$3.90 while
+            // SOL moved. That benchmark is exactly what the signals have to
+            // beat, so killing it made the whole comparison unreadable.
+            // `sol_bh` is mark-only: it never places an order, so it has no
+            // live inventory to reconcile against.
             continue;
         }
         let opened = !before_pos && book.position.is_some();
@@ -313,25 +322,33 @@ async fn one_cycle(
             match action {
                 alloc::LiveAction::None => {}
                 alloc::LiveAction::Skip(why) => {
+                    // The SIMULATION keeps the trade. The signal fired, and
+                    // whether a small wallet could act on it that hour says
+                    // nothing about whether the signal has an edge -- which is
+                    // the only question these books exist to answer. Taking
+                    // the entry back off the book made the simulation silently
+                    // skip exactly the trades the account was too poor for.
                     info!("{} live skip: {why}", book.id);
                     events.push(format!("{} SKIP {why}", book.id));
                     if opened {
-                        if let Some(p) = book.position.take() {
-                            book.fees_paid = (book.fees_paid - p.entry_fee).max(0.0);
+                        if let Some(p) = book.position.as_mut() {
+                            p.live_qty = 0.0;
                         }
                     }
                 }
-                alloc::LiveAction::Adopt { qty, .. } => {
+                alloc::LiveAction::Adopt { pair, qty } => {
                     if let Some(p) = book.position.as_mut() {
-                        p.qty = qty;
                         p.live_qty = qty;
                     }
+                    // Adopted coins were bought before the ledger was looking,
+                    // so they have no basis it can know. Staged here and
+                    // marked in after the loop -- see `adopted` below.
+                    adopted.push((pair.clone(), qty, mark));
                     info!("{} ADOPT inventory qty={qty:.8} (no buy)", book.id);
                     events.push(format!("{} ADOPT {} qty={:.8}", book.id, book.pair, qty));
                 }
                 alloc::LiveAction::Buy { pair, qty, price } => {
                     if let Some(p) = book.position.as_mut() {
-                        p.qty = qty;
                         p.live_qty = qty;
                     }
                     let placed = place_live(mode, live_gw, &pair, 1, qty, price, &mut events).await;
@@ -370,6 +387,18 @@ async fn one_cycle(
     }
 
     state.pending_orders.append(&mut pending);
+    // Only real mode writes the real ledger. A dry run shares this state file
+    // (see `data_dir`), and a preview must not leave fills in it.
+    if matches!(mode, Mode::Live) {
+        for (pair, qty, mark) in adopted {
+            let r = state.live.adopt(ledger::Sleeve::Trade, &pair, qty, mark);
+            if let ledger::Recorded::Applied = r {
+                let msg = format!("LEDGER adopt {pair} {qty:.8} @ {mark:.4} (marked in, not bought)");
+                info!("{msg}");
+                events.push(msg);
+            }
+        }
+    }
 
     if matches!(mode, Mode::Live | Mode::LiveDry) && new_bar {
         if let Some(w) = wallet.as_ref() {
@@ -598,7 +627,7 @@ async fn settle_pending_orders(
     // On an outage: cancel nothing, settle nothing, keep every order tracked.
     // Treating an unreachable exchange as "nothing executed" would withdraw
     // real entries from the books.
-    let executed = match gw.executed_volumes().await {
+    let executed = match gw.executed_fills().await {
         Ok(map) => map,
         Err(e) => {
             warn!("closed orders unreadable ({e:#}) — deferring settlement");
@@ -617,7 +646,7 @@ async fn settle_pending_orders(
 
     for action in actions {
         match action {
-            paper::OrderAction::Settle(order, got) => settle_one(state, &order, got, events),
+            paper::OrderAction::Settle(order, exec) => settle_one(state, &order, exec, now, events),
             paper::OrderAction::Cancel(order) => match gw.cancel(&order.txid).await {
                 Ok(()) => {
                     let msg = format!(
@@ -641,8 +670,22 @@ async fn settle_pending_orders(
     }
 }
 
-/// Apply one settled order to the book that placed it.
-fn settle_one(state: &mut paper::State, order: &paper::PendingOrder, got: f64, events: &mut Vec<String>) {
+/// Apply one settled order: the real fill to the live ledger, and the live
+/// inventory correction to the book that placed it.
+///
+/// TWO destinations on purpose. The ledger gets what Kraken says happened, in
+/// Kraken's dollars. The book gets nothing but a corrected `live_qty` -- the
+/// simulation's size, entry and fees are its own and are not a function of
+/// what a small wallet managed to fill.
+fn settle_one(
+    state: &mut paper::State,
+    order: &paper::PendingOrder,
+    exec: ledger::Execution,
+    now: i64,
+    events: &mut Vec<String>,
+) {
+    let got = exec.vol_exec;
+    record_fill(state, order, exec, now, events);
     if order.side < 0 {
         // A sell is an EXIT, and `step_book` already closed the position and
         // wrote the Trade before the order went out. Unwinding that would mean
@@ -677,17 +720,69 @@ fn settle_one(state: &mut paper::State, order: &paper::PendingOrder, got: f64, e
     let Some(book) = state.books.iter_mut().find(|b| b.id == book_id) else {
         return;
     };
-    match paper::settle_buy(book, order.qty, got) {
+    match paper::settle_live_buy(book, order.qty, got) {
         paper::Settled::Filled => {}
         paper::Settled::Partial { ordered, got } => {
-            let msg = format!("{book_id} PARTIAL fill {got:.8} of {ordered:.8} — book resized");
+            let msg =
+                format!("{book_id} PARTIAL fill {got:.8} of {ordered:.8} — live qty corrected");
             info!("{msg}");
             events.push(msg);
         }
         paper::Settled::Nothing => {
-            let msg = format!("{book_id} NO fill on {} — entry withdrawn", order.txid);
+            let msg = format!(
+                "{book_id} NO fill on {} — simulation keeps the trade, wallet claim dropped",
+                order.txid
+            );
             info!("{msg}");
             events.push(msg);
+        }
+    }
+}
+
+/// Put one real execution on the live ledger.
+///
+/// Attribution comes from the PendingOrder rather than from Kraken's own
+/// `descr`: this bot must only ever account for orders it placed itself, and
+/// the txid list is the only thing that distinguishes those from limit orders
+/// the operator entered by hand on the same account.
+fn record_fill(
+    state: &mut paper::State,
+    order: &paper::PendingOrder,
+    exec: ledger::Execution,
+    now: i64,
+    events: &mut Vec<String>,
+) {
+    let fill = ledger::Fill {
+        txid: order.txid.clone(),
+        ts: exec.at.unwrap_or(now),
+        pair: order.pair.clone(),
+        side: order.side,
+        sleeve: ledger::Sleeve::of(order.book.as_deref()),
+        book: order.book.clone(),
+        qty: exec.vol_exec,
+        cost: exec.cost,
+        fee: exec.fee,
+    };
+    match state.live.record(fill) {
+        ledger::Recorded::Applied => {
+            let msg = format!(
+                "LEDGER {} {} {:.8} cost ${:.4} fee ${:.4}",
+                if order.side > 0 { "buy" } else { "sell" },
+                order.pair,
+                exec.vol_exec,
+                exec.cost,
+                exec.fee
+            );
+            info!("{msg}");
+            events.push(msg);
+        }
+        ledger::Recorded::Duplicate => {
+            warn!("LEDGER {} already recorded — not counted twice", order.txid)
+        }
+        // The common one is "executed nothing", which is a reaped limit
+        // order: a real event for the settler above and a non-event here.
+        ledger::Recorded::Rejected(why) => {
+            tracing::debug!("LEDGER skip {}: {why}", order.txid)
         }
     }
 }
@@ -770,6 +865,12 @@ mod settle_tests {
         s
     }
 
+    /// A fill at roughly the live ETH price, so the ledger sees real money
+    /// move rather than a volume with no cost attached.
+    fn exec(vol: f64) -> ledger::Execution {
+        ledger::Execution { vol_exec: vol, cost: vol * 2_700.0, fee: vol * 2_700.0 * 0.0026, at: None }
+    }
+
     fn buy(book: Option<&str>, qty: f64) -> paper::PendingOrder {
         paper::PendingOrder {
             txid: "OTEST-1".into(),
@@ -787,19 +888,79 @@ mod settle_tests {
         // book would destroy a good record AND leave the bad one standing.
         let mut s = state();
         let mut events = Vec::new();
-        settle_one(&mut s, &buy(Some("eth_1h_sf"), 0.0149), 0.0, &mut events);
+        settle_one(&mut s, &buy(Some("eth_1h_sf"), 0.0149), exec(0.0), 1_790_000_000, &mut events);
 
         let by_id = |id: &str| s.books.iter().find(|b| b.id == id).unwrap();
-        assert!(by_id("eth_1h_sf").position.is_none(), "the phantom goes");
-        assert!(by_id("sol_1h_tl").position.is_some(), "untouched");
-        assert!(by_id("sol_bh").position.is_some(), "untouched");
+        let placed = by_id("eth_1h_sf").position.as_ref().unwrap();
+        assert_eq!(placed.live_qty, 0.0, "nothing arrived, so no wallet claim");
+        assert_eq!(placed.qty, 0.0149, "the simulated trade stands");
+        for other in ["sol_1h_tl", "sol_bh"] {
+            assert_eq!(
+                by_id(other).position.as_ref().unwrap().live_qty,
+                0.0149,
+                "{other} must be untouched"
+            );
+        }
+    }
+
+    #[test]
+    fn a_real_fill_lands_on_the_live_ledger_and_not_on_the_book() {
+        // The whole split, in one settlement. Kraken's own cost and fee go to
+        // the ledger; the book learns only how much of the wallet it owns.
+        let mut s = state();
+        s.live.since = "2026-09-23".into();
+        let mut events = Vec::new();
+        let e = ledger::Execution { vol_exec: 0.001, cost: 2.69609, fee: 0.00701, at: Some(42) };
+        settle_one(&mut s, &buy(Some("eth_1h_sf"), 0.01488212), e, 1_790_000_000, &mut events);
+
+        let p = s.live.get(ledger::Sleeve::Trade, "ETHUSD").expect("a ledger slot");
+        assert!((p.qty - 0.001).abs() < 1e-12);
+        assert!((p.basis_usd - (2.69609 + 0.00701)).abs() < 1e-12, "fee is capitalised");
+        assert!((p.fees_usd - 0.00701).abs() < 1e-12, "the REAL fee, not a modelled one");
+        assert_eq!(s.live.fills[0].ts, 42, "Kraken's own timestamp wins");
+
+        let book = s.books.iter().find(|b| b.id == "eth_1h_sf").unwrap();
+        assert_eq!(book.fees_paid, 0.0, "a real fee never touches a paper book");
+        assert_eq!(book.position.as_ref().unwrap().qty, 0.0149, "simulation untouched");
+        assert_eq!(book.position.as_ref().unwrap().live_qty, 0.001);
+    }
+
+    #[test]
+    fn a_settlement_seen_twice_is_only_counted_once() {
+        // `ClosedOrders` returns the whole recent page every cycle, so the
+        // same txid can be offered again. Money counted twice never unwinds.
+        let mut s = state();
+        s.live.since = "2026-09-23".into();
+        let mut events = Vec::new();
+        let e = ledger::Execution { vol_exec: 0.001, cost: 2.69609, fee: 0.00701, at: None };
+        let order = buy(Some("eth_1h_sf"), 0.001);
+        settle_one(&mut s, &order, e, 1_790_000_000, &mut events);
+        settle_one(&mut s, &order, e, 1_790_000_060, &mut events);
+        let p = s.live.get(ledger::Sleeve::Trade, "ETHUSD").unwrap();
+        assert_eq!(p.buys, 1);
+        assert!((p.qty - 0.001).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_rebalance_fill_is_booked_to_the_hold_sleeve() {
+        // The BTC rebalance owns no book. Its fills are real money and belong
+        // on the ledger, but summing them into the trade sleeve would answer
+        // a question nobody asked and bury the one that was.
+        let mut s = state();
+        s.live.since = "2026-09-23".into();
+        let mut events = Vec::new();
+        let e = ledger::Execution { vol_exec: 0.0003, cost: 25.4, fee: 0.066, at: None };
+        settle_one(&mut s, &buy(None, 0.0003), e, 1_790_000_000, &mut events);
+        assert!(s.live.get(ledger::Sleeve::Trade, "ETHUSD").is_none());
+        let hold = s.live.get(ledger::Sleeve::Hold, "ETHUSD").expect("hold slot");
+        assert!((hold.fees_usd - 0.066).abs() < 1e-12);
     }
 
     #[test]
     fn an_order_naming_an_unknown_book_is_ignored() {
         let mut s = state();
         let mut events = Vec::new();
-        settle_one(&mut s, &buy(Some("deleted_book"), 0.0149), 0.0, &mut events);
+        settle_one(&mut s, &buy(Some("deleted_book"), 0.0149), exec(0.0), 1_790_000_000, &mut events);
         assert!(s.books.iter().all(|b| b.position.is_some()));
     }
 
@@ -812,7 +973,7 @@ mod settle_tests {
         // order that never filled.
         let mut s = state();
         let mut events = Vec::new();
-        settle_one(&mut s, &buy(None, 0.0003), 0.0, &mut events);
+        settle_one(&mut s, &buy(None, 0.0003), exec(0.0), 1_790_000_000, &mut events);
         assert!(s.last_btc_rebalance.is_empty(), "the day must be retryable");
         assert!(events.iter().any(|e| e.contains("never filled")));
     }
@@ -821,7 +982,7 @@ mod settle_tests {
     fn a_filled_btc_rebalance_keeps_the_day_spent() {
         let mut s = state();
         let mut events = Vec::new();
-        settle_one(&mut s, &buy(None, 0.0003), 0.0003, &mut events);
+        settle_one(&mut s, &buy(None, 0.0003), exec(0.0003), 1_790_000_000, &mut events);
         assert_eq!(s.last_btc_rebalance, "2026-09-21");
     }
 
@@ -831,7 +992,7 @@ mod settle_tests {
         // would overshoot; the next day's pass sizes against reality.
         let mut s = state();
         let mut events = Vec::new();
-        settle_one(&mut s, &buy(None, 0.0003), 0.0002, &mut events);
+        settle_one(&mut s, &buy(None, 0.0003), exec(0.0002), 1_790_000_000, &mut events);
         assert_eq!(s.last_btc_rebalance, "2026-09-21");
     }
 
@@ -844,7 +1005,7 @@ mod settle_tests {
         let mut events = Vec::new();
         let mut order = buy(Some("eth_1h_sf"), 0.0149);
         order.side = -1;
-        settle_one(&mut s, &order, 0.0, &mut events);
+        settle_one(&mut s, &order, exec(0.0), 1_790_000_000, &mut events);
 
         assert!(
             s.books.iter().all(|b| b.position.is_some()),
@@ -854,12 +1015,14 @@ mod settle_tests {
     }
 
     #[test]
-    fn a_sell_that_filled_says_nothing() {
+    fn a_sell_that_filled_reports_the_fill_and_nothing_else() {
         let mut s = state();
+        s.live.since = "2026-09-23".into();
         let mut events = Vec::new();
         let mut order = buy(Some("eth_1h_sf"), 0.0149);
         order.side = -1;
-        settle_one(&mut s, &order, 0.0149, &mut events);
-        assert!(events.is_empty());
+        settle_one(&mut s, &order, exec(0.0149), 1_790_000_000, &mut events);
+        assert!(!events.iter().any(|e| e.starts_with("UNSOLD")), "nothing is unsold");
+        assert!(events.iter().any(|e| e.starts_with("LEDGER sell")), "{events:?}");
     }
 }

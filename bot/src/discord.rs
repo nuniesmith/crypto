@@ -3,6 +3,7 @@
 use chrono::{Datelike, Timelike, Utc};
 use tracing::{info, warn};
 
+use crate::ledger::Sleeve;
 use crate::live::{fmt_qty, AccountSnapshot};
 use crate::paper::State;
 
@@ -111,7 +112,16 @@ pub fn format_report(
                 lines.push(String::new());
             }
         }
-        lines.push("**strategy books** _(paper-scale trackers — live orders are wallet-capped)_".into());
+        // The live ledger goes ABOVE the books for the same reason the Kraken
+        // balance does: it is the only section on this report that describes
+        // real money. The books underneath are a simulation at a size this
+        // account has never traded, and reading them as live P&L is exactly
+        // the confusion this section exists to end.
+        lines.extend(live_ledger_block(state, marks));
+        lines.push(
+            "**strategy books** _(pure $1,000-per-book SIMULATION — not the live sleeve above)_"
+                .into(),
+        );
     }
     for b in &state.books {
         let px = marks
@@ -167,6 +177,66 @@ pub fn format_report(
         "_SOL 1h trendline · ETH 1h VWAP+EMA filter · SOL buy-hold. Maker tier-3 fees. Paper only — no exchange orders._".into()
     });
     lines.join("\n")
+}
+
+/// What the real money did, net of real Kraken fees.
+fn live_ledger_block(state: &State, marks: &[(String, f64)]) -> Vec<String> {
+    if state.live.since.is_empty() {
+        return Vec::new();
+    }
+    let t = state.live.totals(Sleeve::Trade, marks);
+    let mut lines = vec![format!(
+        "**live sleeve** _(real Kraken fills since {})_",
+        state.live.since
+    )];
+    if t.fills == 0 {
+        lines.push("_no real fills recorded yet_".into());
+        lines.push(String::new());
+        return lines;
+    }
+    lines.push(format!(
+        "• **net `{:+.4}`** = realized `{:+.4}` + unrealized `{:+.4}`  ·  real fees `${:.4}` over `{}` fills",
+        t.net_usd(),
+        t.realized_usd,
+        t.unrealized_usd,
+        t.fees_usd,
+        t.fills
+    ));
+    for pair in ["ETHUSD", "SOLUSD"] {
+        let Some(p) = state.live.get(Sleeve::Trade, pair) else {
+            continue;
+        };
+        if p.is_flat() {
+            continue;
+        }
+        lines.push(format!(
+            "• holding **{}** `{}` at a cost of `${:.4}`",
+            pair,
+            fmt_qty(p.qty),
+            p.basis_usd
+        ));
+    }
+    if !t.complete() {
+        lines.push(format!(
+            "_⚠ {} pair(s) unpriced — the net above is partial, not zero_",
+            t.unpriced
+        ));
+    }
+    if t.adopted_usd > 0.0 {
+        lines.push(format!(
+            "_`${:.2}` of that cost basis was marked in at the adoption price, not paid_",
+            t.adopted_usd
+        ));
+    }
+    let hold = state.live.totals(Sleeve::Hold, marks);
+    if hold.fills > 0 {
+        lines.push(format!(
+            "_BTC rebalancing (not a bet): `{}` fills, `${:.4}` of real fees_",
+            hold.fills, hold.fees_usd
+        ));
+    }
+    lines.push(String::new());
+    lines
 }
 
 /// Send due reports. Daily ~15:00 UTC, weekly Monday, monthly on the 1st.
@@ -237,6 +307,8 @@ mod tests {
             last_monthly: String::new(),
             last_btc_rebalance: String::new(),
             pending_orders: Vec::new(),
+            live: crate::ledger::LiveLedger::default(),
+            paper_clean_since: String::new(),
         }
     }
 
@@ -257,5 +329,49 @@ mod tests {
         let paper_eq = body.find("equity `$").unwrap();
         assert!(kraken_at < books_at);
         assert!(books_at < paper_eq);
+        assert!(body.contains("SIMULATION"), "the books must be labelled as such");
+    }
+
+    #[test]
+    fn the_live_sleeve_is_reported_above_the_simulation() {
+        // Ordering is the whole point: a reader who stops after the first
+        // number must have read a REAL one. The report used to lead with
+        // paper equity and a `pnl` line that looked exactly like live P&L.
+        use crate::ledger::{Fill, Sleeve};
+        let mut state = live_state();
+        state.live.since = "2026-09-23".into();
+        let f = |txid: &str, side: i8, cost: f64, fee: f64| Fill {
+            txid: txid.into(), ts: 0, pair: "ETHUSD".into(), side,
+            sleeve: Sleeve::Trade, book: Some("eth_1h_sf".into()),
+            qty: 0.001, cost, fee,
+        };
+        state.live.record(f("B1", 1, 2.69609, 0.00701));
+        state.live.record(f("S1", -1, 2.74829, 0.00714));
+        let body = format_report("daily", &state, &[("SOLUSD".into(), 110.0)], None);
+
+        assert!(body.contains("real Kraken fills since 2026-09-23"), "{body}");
+        // Net of the fees Kraken really charged, the round trip made about
+        // four cents. The mixed book printed -$0.11 on the identical fills.
+        assert!(body.contains("**net `+0.0380`**"), "{body}");
+        assert!(body.contains("real fees `$0.0141`"), "{body}");
+        assert!(
+            body.find("live sleeve").unwrap() < body.find("strategy books").unwrap(),
+            "real money must be read before the simulation"
+        );
+    }
+
+    #[test]
+    fn an_unpriced_holding_is_flagged_rather_than_silently_dropped() {
+        use crate::ledger::{Fill, Sleeve};
+        let mut state = live_state();
+        state.live.since = "2026-09-23".into();
+        state.live.record(Fill {
+            txid: "B1".into(), ts: 0, pair: "ETHUSD".into(), side: 1,
+            sleeve: Sleeve::Trade, book: Some("eth_1h_sf".into()),
+            qty: 0.01, cost: 27.48, fee: 0.07,
+        });
+        let body = format_report("daily", &state, &[], None);
+        assert!(body.contains("unpriced"), "{body}");
+        assert!(body.contains("holding **ETHUSD**"), "{body}");
     }
 }

@@ -47,9 +47,32 @@ ETH/SOL from `USD − 30% of (BTC+USD)` is exactly **zero** once BTC+USD sits at
 underweight; making it two-sided without this change would have driven BTC to
 target and then never bought another coin.
 
+## Two sets of books, deliberately
+
+The bot keeps **two** accounts that must never be read as one number.
+
+| | `state.json` → `books` | `state.json` → `live` |
+|---|---|---|
+| What | $1,000-per-book **simulation** | **real Kraken fills** (`vol_exec`/`cost`/`fee`) |
+| Answers | does this signal have an edge at a size worth trading? | what did the 20% sleeve actually make or lose, net of real fees? |
+| Fees | modelled tier-3 maker 0.22% + 1bp slip | whatever Kraken charged |
+| Written by | `paper.rs` only | `ledger.rs`, from settled orders only |
+
+These used to be one set of numbers, and the result described neither. On
+2026-09-22 `eth_1h_sf` went long ETH at 2696.09 and out at 2748.29 — ETH up
+1.9%, signal correct — and the book reported **−$0.11**, because
+`LiveAction::Buy` had overwritten the simulated `qty` with the 0.001 ETH the
+wallet could afford while the entry fee stayed charged on $1,000 of notional.
+The simulation's answer was **+$14.71**; Kraken's was about **+4 cents** on a
+$2.70 position after ~1.4 cents of real fee.
+
+The live ledger starts clean from a stated date (`live.since`) and book
+trades before `paper_clean_since` are left exactly as recorded — they mixed
+the two and cannot honestly be restated as either.
+
 Loop wakes every 60s and **only acts on a new closed 1h bar**. Live path places Kraken **limit** orders, wallet-capped. Spot: no short opens. Fees in the paper-scale books: tier-3 maker 0.22% + 1 bp slip.
 
-Discord (`DISCORD_WEBHOOK_URL`): startup, daily ~15:00 UTC, weekly Monday, monthly 1st. Live reports fetch `POST /0/private/Balance` first, then the policy line, then paper-scale books.
+Discord (`DISCORD_WEBHOOK_URL`): startup, daily ~15:00 UTC, weekly Monday, monthly 1st. Live reports fetch `POST /0/private/Balance` first, then the policy line, then the **live sleeve's real P&L**, and only then the simulation books.
 
 Not in the live bot: XRP, FET, TRUMP, memes, forex. See [docs/research.md](docs/research.md).
 

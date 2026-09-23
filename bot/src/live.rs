@@ -2,9 +2,36 @@
 //! Only constructed when the operator passes the confirm string.
 
 use async_trait::async_trait;
+use exchange_apiws::kraken::KrakenOrder;
 use exchange_apiws::{KrakenCredentials, KrakenPrivateClient};
 use rustrade::{Capability, ExchangeClient, Order, Position, Result, Side, Symbol};
 use std::collections::HashMap;
+
+use crate::ledger::Execution;
+
+/// Read one closed order into the three numbers the ledger needs.
+///
+/// A missing `vol_exec` is the only fatal absence: an order that cannot say
+/// how much it traded cannot settle at all. `cost` and `fee` are defaulted to
+/// zero rather than dropped, because losing the whole record over an
+/// unparseable fee would leave the book believing an entry never arrived —
+/// and the settler would then withdraw a position the wallet really holds.
+/// Zero cost on a real fill is visible in the ledger; a vanished fill is not.
+pub fn execution_of(o: &KrakenOrder) -> Option<Execution> {
+    let vol_exec: f64 = o.vol_exec.parse().ok()?;
+    if !vol_exec.is_finite() {
+        return None;
+    }
+    Some(Execution {
+        vol_exec,
+        cost: o.cost.parse().ok().filter(|v: &f64| v.is_finite()).unwrap_or(0.0),
+        fee: o.fee.parse().ok().filter(|v: &f64| v.is_finite()).unwrap_or(0.0),
+        // `opentm` is when the order opened, not when it filled. These are
+        // limit orders reaped after ten minutes, so the two sit in the same
+        // bar; the settling cycle's clock is the fallback.
+        at: o.opentm.filter(|t| t.is_finite()).map(|t| t as i64),
+    })
+}
 
 pub struct LiveKraken {
     client: KrakenPrivateClient,
@@ -250,7 +277,11 @@ impl LiveKraken {
     /// Kraken returns the most recent page only (50 of 134 on that account),
     /// which is ample for orders minutes old. One that somehow aged past the
     /// page would never settle, and `SETTLE_GIVE_UP_SECS` bounds that.
-    pub async fn executed_volumes(&self) -> anyhow::Result<HashMap<String, f64>> {
+    /// Kraken reports `cost` and `fee` alongside `vol_exec`, and this used to
+    /// throw both away. They are the only record of what a trade actually
+    /// cost: the books were charging a MODELLED 0.23% of $1,000 against
+    /// positions worth a couple of dollars. See `ledger.rs`.
+    pub async fn executed_fills(&self) -> anyhow::Result<HashMap<String, Execution>> {
         let closed = self
             .client
             .get_closed_orders()
@@ -259,8 +290,7 @@ impl LiveKraken {
         Ok(closed
             .closed
             .into_iter()
-            .filter_map(|(txid, o)| o.vol_exec.parse::<f64>().ok().map(|v| (txid, v)))
-            .filter(|(_, v)| v.is_finite())
+            .filter_map(|(txid, o)| execution_of(&o).map(|e| (txid, e)))
             .collect())
     }
 
@@ -410,6 +440,62 @@ mod tests {
         assert!(codes.contains(&"BTC"));
         assert!(codes.contains(&"SOL (SOL.S)"));
         assert!(!codes.iter().any(|c| c.contains("DOGE")));
+    }
+
+    fn closed(vol_exec: &str, cost: &str, fee: &str, opentm: Option<f64>) -> KrakenOrder {
+        serde_json::from_value(serde_json::json!({
+            "status": "closed",
+            "opentm": opentm,
+            "vol": "0.01488212",
+            "vol_exec": vol_exec,
+            "cost": cost,
+            "fee": fee,
+            "descr": { "pair": "ETHUSD", "type": "buy", "ordertype": "limit", "price": "2692.32" }
+        }))
+        .expect("Kraken's own shape")
+    }
+
+    #[test]
+    fn a_closed_order_yields_the_cost_and_fee_the_ledger_needs() {
+        // These two fields were being read off the wire and thrown away, so
+        // the only fee the bot knew was a MODELLED 0.23% of $1,000 -- charged
+        // against a position worth $2.70.
+        let e = execution_of(&closed("0.00100000", "2.69609", "0.00701", Some(1790064512.4)))
+            .expect("a parseable fill");
+        assert!((e.vol_exec - 0.001).abs() < 1e-12);
+        assert!((e.cost - 2.69609).abs() < 1e-12);
+        assert!((e.fee - 0.00701).abs() < 1e-12);
+        assert_eq!(e.at, Some(1_790_064_512), "Kraken's clock, truncated to seconds");
+    }
+
+    #[test]
+    fn an_order_that_traded_nothing_still_parses() {
+        // The ordinary reaped limit order. It must come back as a FACT --
+        // closed, executed zero -- and not as an absence, which the settler
+        // reads as "still open".
+        let e = execution_of(&closed("0.00000000", "0.00000", "0.00000", None)).expect("a fact");
+        assert_eq!(e.vol_exec, 0.0);
+        assert_eq!(e.at, None);
+    }
+
+    #[test]
+    fn an_unreadable_cost_or_fee_does_not_lose_the_whole_fill() {
+        // Dropping the record would leave the settler believing the order
+        // never closed, and eventually the book would drop a wallet claim on
+        // coins that really arrived. A zero cost is visible in the ledger; a
+        // vanished fill is not.
+        let e = execution_of(&closed("0.00100000", "", "oops", None)).expect("still a fill");
+        assert!((e.vol_exec - 0.001).abs() < 1e-12);
+        assert_eq!(e.cost, 0.0);
+        assert_eq!(e.fee, 0.0);
+    }
+
+    #[test]
+    fn an_unreadable_volume_is_not_a_fill_at_all() {
+        // Without a volume there is nothing to settle against, and guessing
+        // zero would withdraw a real entry.
+        assert!(execution_of(&closed("", "2.69", "0.007", None)).is_none());
+        assert!(execution_of(&closed("nan", "2.69", "0.007", None)).is_none());
     }
 
     #[test]

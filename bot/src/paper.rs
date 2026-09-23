@@ -20,8 +20,23 @@ use crate::features::{compute, Bar};
 use crate::ledger::{Execution, LiveLedger, Sleeve, Totals};
 use crate::signal::{structure_filtered, trendline_break};
 
-pub const MAKER_FEE: f64 = 0.0022;
-pub const TAKER_FEE: f64 = 0.0038;
+// Kraken TIER 1 -- the account's ACTUAL schedule, confirmed 2026-09-23.
+//
+// These were 0.0022 / 0.0038, roughly tier 3, so the simulation charged about
+// HALF what the account really pays: maker understated 1.82x, taker 2.11x.
+// Every "is this +EV" judgement the books have ever printed was made at fees
+// the account does not get.
+//
+// This is not a rounding matter. A maker round trip costs 0.80%, not 0.46% --
+// the move a signal must beat before it earns anything nearly doubles. The
+// Python research (src/crypto/sim/fees.py) already models tier 1 as exactly
+// (0.0040, 0.0080) and its verdict at that tier is blunt: "Retail taker
+// (tier 1) is a dead end: 0/7 default combos were +EV in-sample."
+//
+// Raise these only against a real Kraken statement. Tiers improve with 30-day
+// volume, so a tier the account briefly reaches is not the tier it trades at.
+pub const MAKER_FEE: f64 = 0.0040;
+pub const TAKER_FEE: f64 = 0.0080;
 pub const SLIP: f64 = 0.0001;
 pub const NOTIONAL: f64 = 1_000.0;
 pub const HOLD_BARS: i64 = 24; // 24 × 1h
@@ -739,6 +754,35 @@ pub fn print_status(state: &State, marks: &[(String, f64)]) {
 
 
 #[cfg(test)]
+mod fee_tests {
+    use super::*;
+
+    #[test]
+    fn fees_match_the_accounts_real_kraken_tier() {
+        // Tier 1: maker 0.40%, taker 0.80%. The books previously used 0.22% /
+        // 0.38% -- about tier 3 -- and so reported roughly half the true cost
+        // of every trade. A flattering fee makes a losing strategy look
+        // marginal, which is the one error this file must not make.
+        assert_eq!(MAKER_FEE, 0.0040);
+        assert_eq!(TAKER_FEE, 0.0080);
+    }
+
+    #[test]
+    fn a_maker_round_trip_costs_what_tier_one_charges() {
+        // What the signal must beat before it earns anything. At the old
+        // constants this was 0.46%; it is really 0.80% plus slippage.
+        let notional = 1_000.0;
+        let round_trip = fee(notional, true) * 2.0;
+        assert!((round_trip - 8.2).abs() < 1e-9, "got {round_trip}");
+    }
+
+    #[test]
+    fn taker_costs_strictly_more_than_maker() {
+        assert!(fee(1_000.0, false) > fee(1_000.0, true));
+    }
+}
+
+#[cfg(test)]
 mod order_tests {
     use super::*;
 
@@ -1059,7 +1103,11 @@ mod order_tests {
         // The 2026-09-22 ETH trade as the simulation sees it: in at 2696.09,
         // out at 2748.29, $1,000 of notional. The live path filled 0.001 of
         // it and the book printed -$0.11. At the size the book actually
-        // simulates, the same signal made about +$14.71.
+        // simulates, the same signal made about +$11.08.
+        //
+        // It was +$14.71 until the fee constants were corrected to the
+        // account's real Kraken tier 1. That is the whole point: $3.63 of
+        // this trade's apparent profit was a fee the account does not get.
         let mut b = Book::new("eth_1h_sf", "ETHUSD", "structure_filtered");
         let mut log = Vec::new();
         enter(&mut b, 1, &bar(0, 2_696.09), true, &mut log);
@@ -1069,9 +1117,9 @@ mod order_tests {
 
         let t = b.trades.last().unwrap();
         assert!((t.qty * t.entry - NOTIONAL).abs() < 1e-9, "closed at paper size");
-        assert!((t.pnl - 14.71).abs() < 0.02, "pnl {}", t.pnl);
+        assert!((t.pnl - 11.08).abs() < 0.02, "pnl {}", t.pnl);
         assert!(t.pnl > 0.0, "the signal was right and the book must say so");
-        assert!((t.fees - 4.65).abs() < 0.02, "fees {}", t.fees);
+        assert!((t.fees - 8.28).abs() < 0.02, "fees {}", t.fees);
     }
 
     #[test]
@@ -1237,18 +1285,25 @@ mod order_tests {
 
     #[test]
     fn a_repair_never_inflates_a_fee_that_was_already_charged() {
-        // sol_bh entered as a TAKER: $3.90, higher than the maker fee the
-        // repair would write. Raising a recorded cost is inventing one, so
-        // the larger number stands and only the qty is restored.
+        // sol_bh entered as a TAKER: $8.10 at tier 1, higher than the $4.10
+        // maker fee the repair would write. Raising a recorded cost is
+        // inventing one, so the larger number stands and only the qty is
+        // restored.
+        //
+        // The fixture used to say $3.90, a tier-3 taker fee. Once the
+        // constants were corrected that was BELOW the tier-1 maker fee, so
+        // the test stopped exercising its own invariant -- it would have
+        // passed by measuring the repair raising a fee, which is the thing it
+        // exists to forbid.
         let mut b = Book::new("sol_bh", "SOLUSD", "buy_hold");
-        b.fees_paid = 3.90;
+        b.fees_paid = 8.10;
         b.position = Some(Position {
             side: 1, qty: 0.0, entry: 109.91, entry_ts: 0, entry_bar: 0,
-            entry_fee: 3.90, live_qty: 0.0,
+            entry_fee: 8.10, live_qty: 0.0,
         });
         repair_open_position(&mut b).expect("qty is still wrong");
-        assert_eq!(b.position.as_ref().unwrap().entry_fee, 3.90);
-        assert_eq!(b.fees_paid, 3.90);
+        assert_eq!(b.position.as_ref().unwrap().entry_fee, 8.10);
+        assert_eq!(b.fees_paid, 8.10);
     }
 
     #[test]

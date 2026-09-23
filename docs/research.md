@@ -115,3 +115,69 @@ The 60d holdout was a bounce: PUMP +112%, NEAR +85%, AVAX +54% **buy-and-hold**.
 ```
 
 `direction --pair` filters the grid. `fetch-history --interval 15` is enough for 15m/1h/4h resample. Kraken public OHLC is only ~720 bars (~12h at 1m, ~30d at 1h); year-scale data is Binance Vision USDT mapped to Kraken USD names. Rank on that tape; do not treat dollar PnL as Kraken-USD truth.
+
+## 2026-09-23: 28 more coins, same verdict
+
+Screened 28 Kraken USD names the earlier grid could not reach: ATOM, LTC, UNI,
+AAVE, INJ, TIA, SUI, APT, ARB, FIL, XLM, HBAR, ALGO, ICP, GRT, IMX, CRV, LDO,
+ENA, ONDO, JUP, SEI, STX, TRX, ETC, BCH, VET, RUNE
+(`20260923T004306Z_direction`, 365d / 60d holdout / fee tier 3).
+
+**Nothing clears the bar. Do not add any of them.**
+
+First, why this run was even possible: the previous "screen more coins" attempt
+failed on 12 of 18 names with "No Binance 1m mapping". That was not a network
+problem -- `BINANCE_PAIR` is a hand-written table and its entries reduced to
+exactly the 23 coins already screened. The tool could only re-test its own past
+conclusions. The table is now wider and `LOCAL_PAIR` is derived from it.
+
+### The window shape dominates everything
+
+IS was a brutal bear -- every one of the 28 is between -52% and -87% buy-and-hold.
+The 60d holdout was a violent bounce: ARB +162%, UNI +139%, ENA +140%, STX +108%,
+VET +95%. Against a bounce that steep, anything that sits in cash part of the
+time loses to buy-and-hold almost by construction. Every single entry in the
+holdout-leaders table posts a big PnL and a NEGATIVE excess (-154 to -814).
+
+### RUNE: the walk-forward leader that fails the holdout
+
+`structure_filtered RUNEUSD 60m` tops the walk-forward table -- 4/5 folds +EV,
+median $92, 78 trades -- and it is the same engine already live on ETH, which
+makes it the most tempting name in the run.
+
+| window | trades | PnL | PF | vs BH |
+|---|---:|---:|---:|---:|
+| walk-forward | 78 | median +92 | - | - |
+| in-sample | 96 | +314 | - | +978 |
+| **holdout** | **17** | **-212** | **0.29** | **-734** |
+
+The folds and the holdout disagree, and the holdout is the one nothing was
+fitted to. A PF of 0.29 is not a marginal miss. **This is the trap the whole
+holdout exists to catch**, and it caught it.
+
+### ATOM is the only name that beat buy-and-hold in BOTH windows
+
+`range_break ATOMUSD 240m hold=1440m`:
+
+| window | trades | PnL | PF | vs BH |
+|---|---:|---:|---:|---:|
+| in-sample (bear) | 78 | -323 | - | **+359** |
+| holdout (bounce) | 17 | +354 | 4.60 | **+86** |
+
+It lost money in the bear but lost far less than holding, and beat holding on
+the bounce. That is the only spec in 28 coins to manage both. Still not
+tradeable as it stands: 4h is not the live 1h engine, 17 holdout trades is thin,
+and +86 excess is small against that noise. It is the one name worth a dedicated
+study rather than a line in a screen.
+
+### Ignore the profit factors on 1-3 trade cells
+
+Several grid rows report PF values like -2.9e14. Those are divide-by-zero
+artifacts on cells with three trades and no losers. Any ranking that sorts on
+PF without a trade-count floor will surface them first.
+
+### Standing conclusion, now over 48 coins
+
+Two screens, 48 distinct names, one engine. Nothing has beaten buy-and-hold on
+an untouched holdout with a believable trade count. The live sleeves remain
+ETH/SOL 1h at 20%, and that allocation is tuition, not a proven edge.

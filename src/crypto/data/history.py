@@ -50,32 +50,68 @@ BINANCE_PAIR = {
     "VIRTUALUSD": "VIRTUALUSDT",
     "TURBOUSD": "TURBOUSDT",
     "PUMPUSD": "PUMPUSDT",
+    # --- added 2026-09-23 to screen beyond the original 20 -------------------
+    # Liquid Kraken USD names with >=1y of Binance USDT history. The first
+    # screen covered exactly the names already in this table, so widening the
+    # universe starts here rather than with a CLI flag.
+    "ATOMUSD": "ATOMUSDT",
+    "LTCUSD": "LTCUSDT",
+    "UNIUSD": "UNIUSDT",
+    "AAVEUSD": "AAVEUSDT",
+    "INJUSD": "INJUSDT",
+    "TIAUSD": "TIAUSDT",
+    "SUIUSD": "SUIUSDT",
+    "APTUSD": "APTUSDT",
+    "ARBUSD": "ARBUSDT",
+    "FILUSD": "FILUSDT",
+    "XLMUSD": "XLMUSDT",
+    "HBARUSD": "HBARUSDT",
+    "ALGOUSD": "ALGOUSDT",
+    "ICPUSD": "ICPUSDT",
+    "GRTUSD": "GRTUSDT",
+    "IMXUSD": "IMXUSDT",
+    "CRVUSD": "CRVUSDT",
+    "LDOUSD": "LDOUSDT",
+    "ENAUSD": "ENAUSDT",
+    "ONDOUSD": "ONDOUSDT",
+    "JUPUSD": "JUPUSDT",
+    "SEIUSD": "SEIUSDT",
+    "STXUSD": "STXUSDT",
+    "TRXUSD": "TRXUSDT",
+    "ETCUSD": "ETCUSDT",
+    "BCHUSD": "BCHUSDT",
+    "VETUSD": "VETUSDT",
+    "RUNEUSD": "RUNEUSDT",
 }
-LOCAL_PAIR = {
-    "BTCUSDT": "XBTUSD",
-    "ETHUSDT": "ETHUSD",
-    "SOLUSDT": "SOLUSD",
-    "XRPUSDT": "XRPUSD",
-    "AVAXUSDT": "AVAXUSD",
-    "NEARUSDT": "NEARUSD",
-    "TAOUSDT": "TAOUSD",
-    "DOGEUSDT": "XDGUSD",
-    "ADAUSDT": "ADAUSD",
-    "LINKUSDT": "LINKUSD",
-    "PEPEUSDT": "PEPEUSD",
-    "DOTUSDT": "DOTUSD",
-    "RENDERUSDT": "RENDERUSD",
-    "FETUSDT": "FETUSD",
-    "OPUSDT": "OPUSD",
-    "WIFUSDT": "WIFUSD",
-    "BONKUSDT": "BONKUSD",
-    "SHIBUSDT": "SHIBUSD",
-    "FLOKIUSDT": "FLOKIUSD",
-    "TRUMPUSDT": "TRUMPUSD",
-    "VIRTUALUSDT": "VIRTUALUSD",
-    "TURBOUSDT": "TURBOUSD",
-    "PUMPUSDT": "PUMPUSD",
-}
+# Local name that wins when several keys map to the same Binance symbol.
+# Kraken spells these two differently from everyone else and the parquet cache
+# is keyed on the Kraken name.
+_CANONICAL_LOCAL = {"BTCUSDT": "XBTUSD", "DOGEUSDT": "XDGUSD"}
+
+
+def _invert(mapping: dict[str, str]) -> dict[str, str]:
+    """Binance symbol -> local pair name.
+
+    Derived rather than hand-written. The two tables used to be maintained
+    separately, so adding a coin meant editing both and forgetting one failed
+    quietly -- the fetch would succeed and the parquet would land under a name
+    nothing else looked for.
+    """
+    out: dict[str, str] = {}
+    for local, binance in mapping.items():
+        if binance in _CANONICAL_LOCAL:
+            out[binance] = _CANONICAL_LOCAL[binance]
+        elif local.endswith("USDT"):
+            # A passthrough key like "ETHUSDT": "ETHUSDT" is the Binance name,
+            # not a local one; the local spelling is the USD form.
+            continue
+        else:
+            out.setdefault(binance, local)
+    return out
+
+
+LOCAL_PAIR = _invert(BINANCE_PAIR)
+
 VISION_INTERVAL = {1: "1m", 5: "5m", 15: "15m", 60: "1h", 240: "4h"}
 
 _SESSION = requests.Session()

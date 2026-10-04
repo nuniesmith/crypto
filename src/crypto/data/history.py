@@ -112,7 +112,7 @@ def _invert(mapping: dict[str, str]) -> dict[str, str]:
 
 LOCAL_PAIR = _invert(BINANCE_PAIR)
 
-VISION_INTERVAL = {1: "1m", 5: "5m", 15: "15m", 60: "1h", 240: "4h"}
+VISION_INTERVAL = {1: "1m", 5: "5m", 15: "15m", 60: "1h", 240: "4h", 1440: "1d"}
 
 _SESSION = requests.Session()
 _SESSION.headers.update({"User-Agent": "crypto-scalper/0.1 (research; binance-vision)"})

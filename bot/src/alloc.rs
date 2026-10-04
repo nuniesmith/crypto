@@ -62,18 +62,26 @@ impl Wallet {
 /// nothing had exercised in months.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Policy {
-    /// Whether the ETH/SOL 1h books may touch the wallet at all.
+    /// Whether the ETH/SOL sleeve may touch the wallet at all.
     pub trade_sleeve: bool,
     /// Share of the account held as BTC+USD when `trade_sleeve` is on.
     pub core_share: f64,
+    /// Who runs the ETH/SOL sleeve: the daily regime rule (`regime.rs`) when
+    /// true, the 1h books when false. With the regime rule on, the 1h books
+    /// still step as simulations but never place an order.
+    pub regime: bool,
 }
 
 impl Policy {
     /// What the bot actually runs.
-    pub const LIVE: Policy = Policy { trade_sleeve: TRADE_SLEEVE_ENABLED, core_share: CORE_SHARE };
+    pub const LIVE: Policy = Policy {
+        trade_sleeve: TRADE_SLEEVE_ENABLED,
+        core_share: CORE_SHARE,
+        regime: REGIME_SLEEVE,
+    };
     /// Sleeves off: the whole BTC+USD balance is the hold, ETH/SOL frozen.
     /// Kept tested so switching to it is not a leap into cold code.
-    pub const HOLD_ONLY: Policy = Policy { trade_sleeve: false, core_share: 1.0 };
+    pub const HOLD_ONLY: Policy = Policy { trade_sleeve: false, core_share: 1.0, regime: false };
 }
 
 /// Whether the ETH/SOL 1h books may touch the wallet at all.
@@ -81,6 +89,14 @@ impl Policy {
 /// On, but small — see `CORE_SHARE`. Set this to false to freeze ETH/SOL
 /// entirely (`Policy::HOLD_ONLY` is the same thing, and stays tested).
 pub const TRADE_SLEEVE_ENABLED: bool = true;
+
+/// The ETH/SOL sleeve is run by the daily regime rule, not the 1h books.
+///
+/// **On since 2026-10-04**, the operator's call: hold ETH and SOL, and keep
+/// only half of each while it is in a bear regime (see `regime.rs` for the
+/// rule and the study behind it). The 1h books keep stepping as simulations,
+/// so their record stays comparable, but they no longer place orders.
+pub const REGIME_SLEEVE: bool = true;
 
 /// Share of the whole account held as the BTC+USD sleeve; the rest is
 /// trading capital for the ETH/SOL 1h books.
@@ -139,6 +155,16 @@ impl Marks {
     /// must refuse to rebalance rather than proceed with a partial view.
     pub fn complete(&self) -> bool {
         self.btc > 0.0 && self.eth > 0.0 && self.sol > 0.0
+    }
+
+    /// The price of one pair, 0.0 for one this policy does not mark.
+    pub fn of(&self, pair: &str) -> f64 {
+        match pair {
+            "XBTUSD" => self.btc,
+            "ETHUSD" => self.eth,
+            "SOLUSD" => self.sol,
+            _ => 0.0,
+        }
     }
 }
 
@@ -345,6 +371,82 @@ pub fn btc_rebalance(w: &Wallet, m: Marks, p: Policy) -> Option<Rebalance> {
     })
 }
 
+/// What the regime rule wants done about one coin today.
+#[derive(Clone, Debug)]
+pub enum RegimeStep {
+    /// Within one minimum order of the target already: nothing to place, and
+    /// the regime can be counted as applied.
+    AtTarget,
+    /// Under target, but there is no cash to buy with (or not enough for one
+    /// minimum order). Not applied: tomorrow's check tries again.
+    NoCash,
+    /// Marks missing, so the account cannot be valued. Not applied.
+    Unpriced,
+    /// The order that moves the coin to its target.
+    Order(Rebalance),
+}
+
+/// Size one coin of the ETH/SOL sleeve to what its regime calls for.
+///
+/// Each coin's sleeve is an equal share of the trade sleeve, which is itself
+/// `1 − core_share` of the account TOTAL, so a deposit needs no bookkeeping
+/// here either. The coin targets `regime::exposure(bull)` of its sleeve: all
+/// of it in a bull, the `regime::CORE` half in a bear.
+///
+/// Called only when the regime CHANGES (or the first time), not every day:
+/// the study held the coin untouched between flips, and trading the drift in
+/// between would be a different, busier strategy. So a sell in a new bear
+/// takes the coin from wherever it has grown to down to half its sleeve. That
+/// can be more than half the coins after a long rally, which is taking profit,
+/// and is what "sell portions on the swing" means here.
+///
+/// `spendable` is the cash this coin may buy with: free USD minus the hold
+/// sleeve's own cash, less anything already committed this cycle.
+pub fn regime_rebalance(
+    w: &Wallet,
+    m: Marks,
+    p: Policy,
+    pair: &str,
+    bull: bool,
+    spendable: f64,
+) -> RegimeStep {
+    if !m.complete() {
+        return RegimeStep::Unpriced;
+    }
+    let pair: &'static str = match pair {
+        "ETHUSD" => "ETHUSD",
+        "SOLUSD" => "SOLUSD",
+        _ => return RegimeStep::AtTarget,
+    };
+    let mark = m.of(pair);
+    let total = total_usd(w, m);
+    let sleeve = (1.0 - p.core_share) * total / crate::regime::PAIRS.len() as f64;
+    let target = sleeve * crate::regime::exposure(bull);
+    let have = w.coin(pair);
+    let delta = target - have * mark;
+    let min_q = Wallet::min_qty(pair);
+    if delta > 0.0 {
+        let spend = delta.min(spendable.max(0.0));
+        let q = floor_qty(spend / mark);
+        if q < min_q || spend < COST_MIN_USD {
+            // Distinguish "already there" from "can't afford it": only the
+            // second is worth retrying tomorrow.
+            let wanted = floor_qty(delta / mark);
+            return if wanted < min_q || delta < COST_MIN_USD {
+                RegimeStep::AtTarget
+            } else {
+                RegimeStep::NoCash
+            };
+        }
+        return RegimeStep::Order(Rebalance { pair, side: 1, qty: q, price: mark });
+    }
+    let q = floor_qty(((-delta) / mark).min(have));
+    if q < min_q || q * mark < COST_MIN_USD {
+        return RegimeStep::AtTarget;
+    }
+    RegimeStep::Order(Rebalance { pair, side: -1, qty: q, price: mark })
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum LiveAction {
     None,
@@ -376,6 +478,12 @@ pub fn signal_action(
         // liquidate the ETH/SOL that is deliberately being left alone, which
         // is the opposite of "stop trading these".
         return LiveAction::Skip("trade sleeve disabled — paper only");
+    }
+    if p.regime {
+        // The daily regime rule owns the ETH/SOL sleeve now. Letting a 1h
+        // exit sell the inventory, or a 1h entry spend the sleeve's cash,
+        // would have two policies steering the same coins.
+        return LiveAction::Skip("1h books are paper-only — the regime rule runs the sleeve");
     }
     if pair == "XBTUSD" {
         return LiveAction::Skip("BTC is HODL-only");
@@ -447,7 +555,7 @@ mod tests {
     /// of that depends on the share. Pinning the number here means retuning
     /// the live sleeve size does not break a pile of unrelated tests and
     /// tempt someone into "fixing" them by loosening the assertion.
-    const P: Policy = Policy { trade_sleeve: true, core_share: 0.50 };
+    const P: Policy = Policy { trade_sleeve: true, core_share: 0.50, regime: false };
 
     /// Prices near the live ones on 2026-09-21.
     fn marks() -> Marks {
@@ -775,7 +883,7 @@ mod held_tests {
     use super::*;
 
     /// Fixed split, same reasoning as `tests::P` above.
-    const P: Policy = Policy { trade_sleeve: true, core_share: 0.50 };
+    const P: Policy = Policy { trade_sleeve: true, core_share: 0.50, regime: false };
 
     fn marks() -> Marks {
         Marks { btc: 84_594.0, eth: 2_692.0, sol: 115.0 }
@@ -968,6 +1076,117 @@ mod hold_only_tests {
         );
         assert!(trade_cash_usd(&w, marks(), Policy::LIVE) > 0.0);
         assert_eq!(trade_cash_usd(&w, marks(), Policy::HOLD_ONLY), 0.0);
+    }
+}
+
+#[cfg(test)]
+mod regime_sleeve_tests {
+    use super::*;
+
+    /// The real policy: these pin what the regime rule will actually do
+    /// to this account.
+    const P: Policy = Policy::LIVE;
+
+    fn marks() -> Marks {
+        Marks { btc: 85_000.0, eth: 2_700.0, sol: 120.0 }
+    }
+
+    /// Roughly the live account on 2026-10-04: BTC at target, the trade
+    /// sleeve all cash, a dust of ETH and SOL.
+    fn wallet() -> Wallet {
+        Wallet { usd: 83.39, usd_held: 0.0, btc: 0.0012363, eth: 0.0000007, sol: 0.00006805 }
+    }
+
+    fn spendable(w: &Wallet) -> f64 {
+        (w.usd_available() - targets(w, marks(), P).hold_cash).max(0.0)
+    }
+
+    #[test]
+    fn the_live_policy_runs_the_regime_rule_and_silences_the_1h_books() {
+        assert!(P.trade_sleeve && P.regime);
+        let w = wallet();
+        let a = signal_action("trendline_break", "SOLUSD", true, false, Some(1), 120.0, &w, marks(), 0.0, P);
+        assert!(matches!(a, LiveAction::Skip(_)), "a 1h entry must not buy: {a:?}");
+        let a = signal_action("trendline_break", "SOLUSD", false, true, Some(1), 120.0, &w, marks(), 0.01, P);
+        assert!(matches!(a, LiveAction::Skip(_)), "a 1h exit must not sell: {a:?}");
+    }
+
+    #[test]
+    fn a_bull_buys_each_coin_to_a_tenth_of_the_account() {
+        let w = wallet();
+        let total = total_usd(&w, marks());
+        for pair in ["ETHUSD", "SOLUSD"] {
+            let RegimeStep::Order(r) = regime_rebalance(&w, marks(), P, pair, true, spendable(&w))
+            else {
+                panic!("{pair}: a bull from cash must buy");
+            };
+            assert_eq!(r.side, 1);
+            let spend = r.qty * r.price;
+            assert!((spend / total - 0.10).abs() < 0.01, "{pair} spend {spend} of {total}");
+        }
+    }
+
+    #[test]
+    fn two_bull_buys_together_fit_in_the_sleeve_cash() {
+        // Both coins can flip on the same day; together they must not reach
+        // into the hold sleeve's cash.
+        let w = wallet();
+        let mut left = spendable(&w);
+        for pair in ["ETHUSD", "SOLUSD"] {
+            if let RegimeStep::Order(r) = regime_rebalance(&w, marks(), P, pair, true, left) {
+                left -= r.qty * r.price;
+            }
+        }
+        assert!(left >= -1e-6, "overspent by {}", -left);
+    }
+
+    #[test]
+    fn a_bear_sells_down_to_the_core_half() {
+        let m = marks();
+        let mut w = wallet();
+        let total = total_usd(&w, m);
+        // ETH sitting exactly at a full tenth of the account.
+        w.eth = 0.10 * total / m.eth;
+        w.usd -= 0.10 * total;
+        let RegimeStep::Order(r) = regime_rebalance(&w, m, P, "ETHUSD", false, 0.0) else {
+            panic!("a bear at full size must sell");
+        };
+        assert_eq!(r.side, -1);
+        assert!((r.qty / w.eth - 0.5).abs() < 0.01, "sold {} of {}", r.qty, w.eth);
+    }
+
+    #[test]
+    fn a_coin_already_at_target_places_nothing() {
+        let m = marks();
+        let mut w = wallet();
+        let total = total_usd(&w, m);
+        w.eth = 0.10 * total / m.eth;
+        w.usd -= 0.10 * total;
+        assert!(matches!(regime_rebalance(&w, m, P, "ETHUSD", true, 100.0), RegimeStep::AtTarget));
+    }
+
+    #[test]
+    fn no_spare_cash_is_retried_rather_than_counted_as_done() {
+        let w = wallet();
+        assert!(matches!(regime_rebalance(&w, marks(), P, "ETHUSD", true, 0.0), RegimeStep::NoCash));
+    }
+
+    #[test]
+    fn a_sell_smaller_than_kraken_allows_is_not_attempted() {
+        // SOL's minimum is 0.06 coin (~$7): half of a dust holding is below it.
+        let mut w = wallet();
+        w.sol = 0.05;
+        assert!(matches!(regime_rebalance(&w, marks(), P, "SOLUSD", false, 0.0), RegimeStep::AtTarget));
+    }
+
+    #[test]
+    fn missing_prices_never_size_an_order() {
+        let mut m = marks();
+        m.sol = 0.0;
+        assert!(matches!(
+            regime_rebalance(&wallet(), m, P, "ETHUSD", true, 100.0),
+            RegimeStep::Unpriced
+        ));
     }
 }
 

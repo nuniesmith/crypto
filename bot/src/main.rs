@@ -23,6 +23,7 @@ mod ledger;
 mod live;
 mod paper;
 mod paper_ex;
+mod regime;
 mod signal;
 
 use features::Bar;
@@ -424,6 +425,8 @@ async fn one_cycle(
                 );
             }
             maybe_btc_rebalance(&mut state, mode, live_gw, w, marks_snapshot, &mut events).await;
+            maybe_regime_rebalance(&mut state, mode, live_gw, client, w, marks_snapshot, &mut events)
+                .await;
         }
     }
 
@@ -502,6 +505,22 @@ async fn snapshot_account(
         }
         Err(e) => live::AccountSnapshot::failed(e.to_string()),
     }
+}
+
+/// Closes of CLOSED daily candles, oldest first: Kraken's last daily candle
+/// is the day still forming, and the regime rule must never read it.
+async fn fetch_closed_daily(client: &KrakenRestClient, pair: &str) -> anyhow::Result<Vec<f64>> {
+    let ohlc = client
+        .get_ohlc(pair, 1440)
+        .await
+        .map_err(|e| anyhow::anyhow!("daily OHLC {pair}: {e}"))?;
+    let now = Utc::now().timestamp();
+    Ok(ohlc
+        .candles
+        .iter()
+        .filter(|c| c.time + 86_400 <= now)
+        .map(|c| c.close_f64())
+        .collect())
 }
 
 async fn fetch_closed_1h(client: &KrakenRestClient, pair: &str) -> anyhow::Result<Vec<Bar>> {
@@ -686,6 +705,24 @@ fn settle_one(
 ) {
     let got = exec.vol_exec;
     record_fill(state, order, exec, now, events);
+    if let Some(pair) = order.book.as_deref().and_then(|b| b.strip_prefix(REGIME_BOOK_PREFIX)) {
+        // A regime order that executed nothing never really applied its
+        // change, so forget it and let the next cycle size the coin again.
+        // A partial fill is kept, like the BTC rebalance's: re-sizing on a
+        // later flip absorbs the remainder.
+        if order.qty > 0.0 && got <= 1e-9 {
+            let msg = format!("regime {pair} order {} never filled — will retry", order.txid);
+            info!("{msg}");
+            events.push(msg);
+            state.regime_applied.remove(pair);
+            state.last_regime_day.clear();
+        } else if got + 1e-9 < order.qty {
+            let msg = format!("regime {pair} PARTIAL fill {got:.8} of {:.8}", order.qty);
+            info!("{msg}");
+            events.push(msg);
+        }
+        return;
+    }
     if order.side < 0 {
         // A sell is an EXIT, and `step_book` already closed the position and
         // wrote the Trade before the order went out. Unwinding that would mean
@@ -829,6 +866,122 @@ async fn maybe_btc_rebalance(
     }
 }
 
+/// Once per UTC day: read each coin's regime from its closed daily candles,
+/// and size the coin when its regime has changed since it was last sized.
+///
+/// Both coins are read before either is acted on, and a failed read leaves
+/// the day open, so an outage is retried next hour rather than skipping a
+/// day. A coin whose regime is unchanged is left alone (see
+/// `alloc::regime_rebalance` for why the drift in between is not traded).
+async fn maybe_regime_rebalance(
+    state: &mut paper::State,
+    mode: Mode,
+    live_gw: Option<&live::LiveKraken>,
+    client: &KrakenRestClient,
+    w: &alloc::Wallet,
+    m: alloc::Marks,
+    events: &mut Vec<String>,
+) {
+    let p = alloc::Policy::LIVE;
+    if !p.trade_sleeve || !p.regime {
+        return;
+    }
+    let today = Utc::now().format("%Y-%m-%d").to_string();
+    if state.last_regime_day == today {
+        return;
+    }
+    if !m.complete() {
+        info!("regime: marks incomplete — retrying next cycle");
+        return;
+    }
+    let mut readings = Vec::new();
+    for pair in regime::PAIRS {
+        let closes = match fetch_closed_daily(client, pair).await {
+            Ok(c) => c,
+            Err(e) => {
+                warn!("regime: {e:#} — retrying next cycle");
+                return;
+            }
+        };
+        let Some(r) = regime::evaluate(&closes) else {
+            warn!(
+                "regime: {pair} has {} closed daily candles, needs {} — retrying next cycle",
+                closes.len(),
+                regime::SMA_DAYS
+            );
+            return;
+        };
+        readings.push((pair, r));
+    }
+
+    // Never spend the hold sleeve's cash; what is left is shared by both
+    // coins, so each buy placed comes off it before the next is sized.
+    let mut spendable = (w.usd_available() - alloc::targets(w, m, p).hold_cash).max(0.0);
+    let now = Utc::now().timestamp();
+    for (pair, r) in readings {
+        let label = if r.bull { "BULL" } else { "BEAR" };
+        let applied = state.regime_applied.get(pair).copied();
+        let changed = applied != Some(r.bull);
+        let msg = format!(
+            "regime {pair} {label}: close {:.2} vs 200d {:.2} ({:+.1}%) → hold {:.0}% of its sleeve{}",
+            r.close,
+            r.sma,
+            100.0 * r.distance(),
+            100.0 * regime::exposure(r.bull),
+            match applied {
+                None => " (first sizing)",
+                Some(_) if changed => " (CHANGED — resizing)",
+                Some(_) => " (unchanged)",
+            }
+        );
+        info!("{msg}");
+        if !changed {
+            continue;
+        }
+        events.push(msg);
+        match alloc::regime_rebalance(w, m, p, pair, r.bull, spendable) {
+            alloc::RegimeStep::AtTarget => {
+                state.regime_applied.insert(pair.to_string(), r.bull);
+            }
+            alloc::RegimeStep::NoCash => {
+                let msg = format!("regime {pair}: under target but no spare cash — retrying tomorrow");
+                info!("{msg}");
+                events.push(msg);
+            }
+            alloc::RegimeStep::Unpriced => {
+                info!("regime {pair}: unpriced — retrying next cycle");
+                return;
+            }
+            alloc::RegimeStep::Order(rb) => {
+                let placed =
+                    place_live(mode, live_gw, rb.pair, rb.side, rb.qty, rb.price, events).await;
+                if let Placed::Live(txid) = &placed {
+                    state.pending_orders.push(paper::PendingOrder {
+                        txid: txid.clone(),
+                        pair: rb.pair.to_string(),
+                        side: rb.side,
+                        placed_at: now,
+                        book: Some(format!("{REGIME_BOOK_PREFIX}{}", rb.pair)),
+                        qty: rb.qty,
+                    });
+                }
+                if placed.acted() {
+                    state.regime_applied.insert(pair.to_string(), r.bull);
+                    if rb.side > 0 {
+                        spendable -= rb.qty * rb.price;
+                    }
+                }
+            }
+        }
+    }
+    state.last_regime_day = today;
+}
+
+/// Marks a pending order as the regime rule's rather than a 1h book's. The
+/// ledger counts any order with a book name as the trade sleeve's, which is
+/// right for these too.
+const REGIME_BOOK_PREFIX: &str = "regime:";
+
 async fn fetch_marks(client: &KrakenRestClient) -> anyhow::Result<Vec<(String, f64)>> {
     let mut out = Vec::new();
     for pair in ["SOLUSD", "ETHUSD", "XBTUSD"] {
@@ -880,6 +1033,57 @@ mod settle_tests {
             book: book.map(str::to_string),
             qty,
         }
+    }
+
+    fn regime_order(side: i8, qty: f64) -> paper::PendingOrder {
+        paper::PendingOrder {
+            txid: "OREGIME-1".into(),
+            pair: "ETHUSD".into(),
+            side,
+            placed_at: 0,
+            book: Some(format!("{REGIME_BOOK_PREFIX}ETHUSD")),
+            qty,
+        }
+    }
+
+    #[test]
+    fn an_unfilled_regime_order_forgets_its_change_so_it_is_retried() {
+        // Both directions: a bear's sell that never filled leaves the coins
+        // there, and a bull's buy that never filled leaves the cash. Either
+        // way the regime was never applied, and keeping it marked as applied
+        // would mean waiting for the NEXT flip, possibly months away.
+        for side in [1, -1] {
+            let mut s = state();
+            s.last_regime_day = "2026-10-04".into();
+            s.regime_applied.insert("ETHUSD".into(), true);
+            s.regime_applied.insert("SOLUSD".into(), true);
+            let mut events = Vec::new();
+            settle_one(&mut s, &regime_order(side, 0.01), exec(0.0), 1_790_000_000, &mut events);
+            assert!(!s.regime_applied.contains_key("ETHUSD"), "side {side}: ETH must be re-sized");
+            assert_eq!(s.regime_applied.get("SOLUSD"), Some(&true), "SOL is untouched");
+            assert!(s.last_regime_day.is_empty(), "side {side}: retried next cycle, not tomorrow");
+            assert!(events.iter().any(|e| e.contains("never filled")));
+        }
+    }
+
+    #[test]
+    fn a_filled_regime_order_stays_applied_and_touches_no_book() {
+        let mut s = state();
+        s.last_regime_day = "2026-10-04".into();
+        s.regime_applied.insert("ETHUSD".into(), false);
+        let snapshot = |s: &paper::State| -> Vec<(f64, f64)> {
+            s.books
+                .iter()
+                .map(|b| b.position.as_ref().map(|p| (p.qty, p.live_qty)).unwrap_or_default())
+                .collect()
+        };
+        let before = snapshot(&s);
+        let mut events = Vec::new();
+        settle_one(&mut s, &regime_order(-1, 0.01), exec(0.01), 1_790_000_000, &mut events);
+        assert_eq!(s.regime_applied.get("ETHUSD"), Some(&false));
+        assert_eq!(s.last_regime_day, "2026-10-04");
+        let after = snapshot(&s);
+        assert_eq!(before, after, "the 1h simulations are not the regime rule's to settle");
     }
 
     #[test]

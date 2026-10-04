@@ -105,6 +105,18 @@ pub struct State {
     /// UTC date `YYYY-MM-DD` of the last BTC rebalance actually placed.
     #[serde(default)]
     pub last_btc_rebalance: String,
+    /// UTC date `YYYY-MM-DD` the regime rule last evaluated both coins.
+    #[serde(default)]
+    pub last_regime_day: String,
+    /// The regime (true = bull) each ETH/SOL pair was last SIZED for.
+    ///
+    /// The rule trades only when a coin's regime changes, so this is what it
+    /// compares today's reading against. A pair missing from the map has
+    /// never been sized, and the next check sizes it. An order that never
+    /// fills removes its pair again, so the change is retried rather than
+    /// forgotten.
+    #[serde(default)]
+    pub regime_applied: std::collections::BTreeMap<String, bool>,
     /// Live limit orders this bot placed that have not been seen to fill.
     #[serde(default)]
     pub pending_orders: Vec<PendingOrder>,
@@ -166,6 +178,8 @@ impl State {
             last_weekly: String::new(),
             last_monthly: String::new(),
             last_btc_rebalance: String::new(),
+            last_regime_day: String::new(),
+            regime_applied: Default::default(),
             pending_orders: Vec::new(),
             live: LiveLedger::default(),
             paper_clean_since: String::new(),

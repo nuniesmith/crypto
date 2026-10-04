@@ -306,6 +306,8 @@ mod tests {
             last_weekly: String::new(),
             last_monthly: String::new(),
             last_btc_rebalance: String::new(),
+            last_regime_day: String::new(),
+            regime_applied: Default::default(),
             pending_orders: Vec::new(),
             live: crate::ledger::LiveLedger::default(),
             paper_clean_since: String::new(),

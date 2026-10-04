@@ -1,6 +1,6 @@
-# crypto — Kraken 1h SOL/ETH bot + fee-aware research
+# crypto — Kraken bot (BTC hold + daily ETH/SOL regime) + fee-aware research
 
-What is **running now** (oryx, `systemd --user`): **LIVE Kraken**, 1-hour bars, SOL and ETH only.
+What is **running now** (oryx, `systemd --user`): **LIVE Kraken**, an hourly loop: a BTC+USD hold sleeve, and ETH/SOL on a daily regime rule (since 2026-10-04; the 1h SOL/ETH books are now simulation-only).
 
 This repo is not a 1-minute scalp. Walk-forwards after Kraken fees killed 1m/15m. The live sleeves came from a 1h/4h structure-break study versus buy-and-hold.
 
@@ -26,12 +26,14 @@ via `./scripts/run-bot.sh live`.
 **Live wallet (real Kraken balances, not $1k books).** Two sleeves over one
 account, both sized as a share of the account TOTAL:
 
-**The ETH/SOL sleeve was cut from 50% to 20% on 2026-09-21.** It lost to buy-and-hold on the holdout by $325 (SOL) and $280 (ETH), capturing roughly 22% of the bull move, and zero of the 18 cells in that run beat BH — see [docs/research.md](docs/research.md). It is a **bet size on a signal that failed this repo's own gate**, not an allocation to a proven edge. 20% is tuition: enough that live results mean something, little enough that another 22%-capture rally costs a few percent of the account.
+**Since 2026-10-04 the ETH/SOL sleeve is a daily regime rule, not the 1h books.** Each coin gets half the sleeve (10% of the account). It holds all of it in a bull and keeps a never-sold 50% core in a bear. A bear starts when the daily close falls more than 5% below its 200-day average, a bull when it rises more than 5% above; inside that buffer the state holds. A coin trades only when its regime changes (about three times a year), never on the drift in between. Chosen from [`src/crypto/opt/regime.py`](src/crypto/opt/regime.py)'s study of standard rules at tier-1 fees: since 2018 (ETH) and 2021 (SOL) it returned 6.2× and 24.7× against buy-and-hold's 3.1× and 8.6×, mostly by stepping aside in the 2018 and 2022 crashes, and it lagged holding in a crash-free stretch (ETH 2022–26: 2.1× vs 2.7×). The 1h books still step as simulations so their record stays comparable, but they place no orders. Rule: `bot/src/regime.rs`; sizing: `alloc::regime_rebalance`.
+
+(Before that, the sleeve was cut from 50% to 20% on 2026-09-21: the 1h books lost to buy-and-hold on the holdout by $325 (SOL) and $280 (ETH), capturing roughly 22% of the bull move — see [docs/research.md](docs/research.md). The sleeve stays at 20%, the operator's call.)
 
 | Sleeve | Share | Policy |
 |---|---|---|
 | **Hold** — BTC + USD | **80%** | BTC **70% of the sleeve** (56% of the account), cash the rest. Rebalanced **both ways** outside ±10 points, at most once per UTC day. No 1h signals on BTC. |
-| **Trade** — ETH + SOL | **20%** | `eth_1h_sf` and `sol_1h_tl` spend from this sleeve only. A new long **adopts** existing inventory rather than buying. A flat book does not dump the pile. `sol_bh` is **mark-only**. |
+| **Trade** — ETH + SOL | **20%** | 10% per coin. **Daily regime rule** (`regime.rs`): 100% of the coin's share in a bull, the 50% core in a bear (200-day average ±5%). Sized once per UTC day, only when a coin's regime changes. The 1h books (`eth_1h_sf`, `sol_1h_tl`) and `sol_bh` are simulation-only. |
 
 Raising the sleeve should follow a run where it actually clears the gate — beats buy-and-hold **and** survives walk-forward — not a good week. `Policy::HOLD_ONLY` freezes ETH/SOL entirely and stays tested, so switching to it is one constant, not a rewrite.
 

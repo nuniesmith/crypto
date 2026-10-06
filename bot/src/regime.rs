@@ -41,7 +41,12 @@ pub const CORE: f64 = 0.50;
 pub const PAIRS: [&str; 3] = ["XBTUSD", "ETHUSD", "SOLUSD"];
 
 /// One day's reading for a coin.
-#[derive(Clone, Copy, Debug, PartialEq)]
+///
+/// `Serialize`/`Deserialize` so `State::regime_reading` (`paper.rs`) can
+/// persist the last reading for Discord's regime section — the daily read
+/// and the daily/weekly/monthly report run on different schedules, so the
+/// report cannot assume it is reading fresh off a just-completed read.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Reading {
     /// The last closed daily close.
     pub close: f64,

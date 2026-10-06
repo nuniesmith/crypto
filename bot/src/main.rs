@@ -215,7 +215,7 @@ async fn report_cmd() -> anyhow::Result<()> {
         println!();
     }
     print_status(&state, &marks);
-    discord::maybe_report(&mut state, &marks, Some("startup"), account.as_ref()).await;
+    discord::maybe_report(&mut state, Some("startup"), account.as_ref()).await;
     save_state(&state)?;
     if discord::webhook_url().is_none() {
         anyhow::bail!("set DISCORD_WEBHOOK_URL to an https://discord.com/api/webhooks/... URL");
@@ -337,7 +337,7 @@ async fn one_cycle(
     } else {
         None
     };
-    discord::send_kinds(&mut state, &marks, &kinds, account.as_ref()).await;
+    discord::send_kinds(&mut state, &kinds, account.as_ref()).await;
     save_state(&state)?;
     if !events.is_empty() {
         append_journal(&serde_json::json!({
@@ -816,6 +816,7 @@ async fn maybe_read_regime(
             events.push(msg);
         }
         state.regime_bull.insert(pair.to_string(), r.bull);
+        state.regime_reading.insert(pair.to_string(), *r);
     }
     state.last_regime_day = today;
 }

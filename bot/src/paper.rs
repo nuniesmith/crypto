@@ -161,6 +161,12 @@ pub struct State {
     /// holds — a failed read leaves the previous value in place untouched).
     #[serde(default)]
     pub regime_bull: std::collections::BTreeMap<String, bool>,
+    /// The FULL last reading (close, 200d average, bull/bear) behind each
+    /// `regime_bull` entry, kept only for Discord's regime section — trading
+    /// decisions use `regime_bull` alone. Updated alongside it, never
+    /// independently.
+    #[serde(default)]
+    pub regime_reading: std::collections::BTreeMap<String, crate::regime::Reading>,
     /// USD still waiting to be invested from a deposit, across BTC/ETH/SOL by
     /// their effective target weights. Reduced only by what an order actually
     /// FILLED (cost + fee), never by what was ordered — see `alloc::invest`.
@@ -298,6 +304,7 @@ impl State {
             paper_clean_since: String::new(),
             policy_version: 0,
             regime_bull: Default::default(),
+            regime_reading: Default::default(),
             deposit_backlog_usd: 0.0,
             flows: Vec::new(),
             last_ledger_time: 0.0,

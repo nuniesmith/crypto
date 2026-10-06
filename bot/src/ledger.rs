@@ -298,6 +298,12 @@ impl LiveLedger {
         self.pairs.last_mut().expect("just pushed")
     }
 
+    /// Not called by the checked-in binary since the live report stopped
+    /// breaking P&L out per pair (`discord.rs`'s old live-ledger block) —
+    /// kept as the ledger's one per-pair read, exercised by this module's
+    /// own tests and by `main.rs`'s migration test, which uses it to pin
+    /// that `adopt` gave each coin a basis.
+    #[allow(dead_code)]
     pub fn get(&self, sleeve: Sleeve, pair: &str) -> Option<&PairLedger> {
         self.pairs
             .iter()

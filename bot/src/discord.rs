@@ -150,7 +150,9 @@ fn regime_block(state: &State) -> Vec<String> {
     lines
 }
 
-/// "pending work: flips not yet applied, deposit backlog, open orders."
+/// "pending work: flips not yet applied, deposit backlog, open orders" —
+/// "deposit backlog" is now just whether `deposit_pending` is set; there is
+/// no dollar amount left to track (see `paper::State::deposit_pending`).
 fn pending_work_block(state: &State) -> Vec<String> {
     let mut lines = vec!["**pending work**".to_string()];
     let flips: Vec<&str> = regime::PAIRS
@@ -167,11 +169,8 @@ fn pending_work_block(state: &State) -> Vec<String> {
             flips.join(", ")
         ));
     }
-    if state.deposit_backlog_usd >= 0.01 {
-        lines.push(format!(
-            "• deposit backlog: `${:.2}` waiting to be invested",
-            state.deposit_backlog_usd
-        ));
+    if state.deposit_pending {
+        lines.push("• investing a deposit into whatever it makes underweight".to_string());
     }
     if state.pending_orders.is_empty() {
         lines.push("• no open orders".into());
@@ -414,13 +413,13 @@ mod tests {
     }
 
     #[test]
-    fn pending_work_lists_an_unapplied_flip_the_backlog_and_an_open_order() {
+    fn pending_work_lists_an_unapplied_flip_a_pending_deposit_and_an_open_order() {
         let mut s = live_state();
         s.regime_bull.insert("ETHUSD".into(), false);
         s.regime_applied.insert("ETHUSD".into(), true); // stale: bull, now bear
         s.regime_bull.insert("SOLUSD".into(), true);
         s.regime_applied.insert("SOLUSD".into(), true); // up to date
-        s.deposit_backlog_usd = 42.5;
+        s.deposit_pending = true;
         s.pending_orders.push(PendingOrder {
             txid: "O1".into(),
             pair: "ETHUSD".into(),
@@ -439,7 +438,10 @@ mod tests {
             !body.contains("ETHUSD, SOLUSD"),
             "SOLUSD is up to date and must not be listed"
         );
-        assert!(body.contains("deposit backlog: `$42.50`"), "{body}");
+        assert!(
+            body.contains("investing a deposit into whatever it makes underweight"),
+            "{body}"
+        );
         assert!(
             body.contains("open order: sell `0.01000000` ETHUSD"),
             "{body}"
@@ -453,7 +455,7 @@ mod tests {
         let body = format_report("daily", &s, Some(&acct));
         assert!(body.contains("no flips outstanding"));
         assert!(body.contains("no open orders"));
-        assert!(!body.contains("deposit backlog"));
+        assert!(!body.contains("investing a deposit"));
     }
 
     #[test]

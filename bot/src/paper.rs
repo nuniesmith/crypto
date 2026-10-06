@@ -167,11 +167,16 @@ pub struct State {
     /// independently.
     #[serde(default)]
     pub regime_reading: std::collections::BTreeMap<String, crate::regime::Reading>,
-    /// USD still waiting to be invested from a deposit, across BTC/ETH/SOL by
-    /// their effective target weights. Reduced only by what an order actually
-    /// FILLED (cost + fee), never by what was ordered — see `alloc::invest`.
+    /// Set when a USD/USDC/USDT deposit is seen, cleared once there is
+    /// nothing left to invest from it. While set, `main.rs`'s gap-closing
+    /// pass also buys (never sells) pairs whose regime is already applied,
+    /// so fresh cash flows into whichever coins it makes underweight rather
+    /// than sitting idle — see `main::deposit_top_up_pair`. There is no
+    /// dollar amount to track: the gap to each coin's effective target,
+    /// computed fresh against the CURRENT total, is already exactly "how
+    /// much of the deposit this coin still wants."
     #[serde(default)]
-    pub deposit_backlog_usd: f64,
+    pub deposit_pending: bool,
     /// Every deposit/withdrawal this bot has recorded from Kraken's Ledgers,
     /// most recent last. This is ALSO the dedup record: a refid already in
     /// here is never applied twice, even across a restart or a re-fetched
@@ -305,7 +310,7 @@ impl State {
             policy_version: 0,
             regime_bull: Default::default(),
             regime_reading: Default::default(),
-            deposit_backlog_usd: 0.0,
+            deposit_pending: false,
             flows: Vec::new(),
             last_ledger_time: 0.0,
             net_deposits_usd: 0.0,
@@ -1102,7 +1107,7 @@ mod order_tests {
             "an old file predates every policy version"
         );
         assert!(s.regime_bull.is_empty());
-        assert_eq!(s.deposit_backlog_usd, 0.0);
+        assert!(!s.deposit_pending);
         assert!(s.flows.is_empty());
         assert_eq!(s.last_ledger_time, 0.0);
         assert_eq!(s.net_deposits_usd, 0.0);

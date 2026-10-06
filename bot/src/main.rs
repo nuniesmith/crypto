@@ -373,7 +373,6 @@ async fn work_tick(
     maybe_run_policy_migration(state, w, m, now, events);
     maybe_convert_stables(state, mode, live_gw, client, w, policy, now, events).await;
     maybe_scan_ledgers(state, mode, live_gw, m, now, events).await;
-    maybe_invest_backlog(state, mode, live_gw, client, w, m, policy, now, events).await;
     maybe_read_regime(state, client, events).await;
     maybe_close_gaps(state, mode, live_gw, client, w, m, policy, now, events).await;
     maybe_append_history(state, w, m, events);
@@ -501,10 +500,11 @@ async fn convert_one_stable(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Purpose {
     /// Closing a pair's gap to its effective target: a flip, the one-time
-    /// policy move, or the `rebalance` command.
+    /// policy move, or the `rebalance` command. Can be either side.
     Rebalance,
-    /// Investing a share of the deposit backlog into one coin.
-    Deposit,
+    /// Topping up a pair whose regime is already applied, while
+    /// `deposit_pending` — see `deposit_top_up_pair`. BUY only, never a sell.
+    DepositBuy,
     /// Selling a USDC/USDT balance to USD.
     Stable,
 }
@@ -513,7 +513,7 @@ impl Purpose {
     const fn prefix(self) -> &'static str {
         match self {
             Purpose::Rebalance => "rebalance:",
-            Purpose::Deposit => "deposit:",
+            Purpose::DepositBuy => "deposit:",
             Purpose::Stable => "stable:",
         }
     }
@@ -523,7 +523,7 @@ impl Purpose {
     }
 
     fn parse(tag: &str) -> Option<(Purpose, &str)> {
-        for p in [Purpose::Rebalance, Purpose::Deposit, Purpose::Stable] {
+        for p in [Purpose::Rebalance, Purpose::DepositBuy, Purpose::Stable] {
             if let Some(rest) = tag.strip_prefix(p.prefix()) {
                 return Some((p, rest));
             }
@@ -571,10 +571,11 @@ fn usd_value_of(asset: &str, amount: f64, m: alloc::Marks) -> Option<f64> {
 
 /// Apply one newly-seen Kraken ledger entry: record it in `state.flows` (the
 /// dedup record), fold its USD value into `net_deposits_usd`, and — for a
-/// USD-like deposit only — add to `deposit_backlog_usd`. Returns whether it
-/// was new (`false` means a refid already on file, which is exactly the hard
-/// rule "a deposit refid is counted exactly once, even across restarts and
-/// repeated ledger pages").
+/// USD-like deposit only — set `deposit_pending` so the next gap-closing
+/// pass tops up whatever it finds underweight. Returns whether it was new
+/// (`false` means a refid already on file, which is exactly the hard rule "a
+/// deposit refid is counted exactly once, even across restarts and repeated
+/// ledger pages").
 fn apply_ledger_entry(
     state: &mut paper::State,
     refid: &str,
@@ -616,7 +617,7 @@ fn apply_ledger_entry(
         paper::FlowKind::Deposit => {
             state.net_deposits_usd += usd_value;
             if matches!(asset.as_str(), "USD" | "USDC" | "USDT") {
-                state.deposit_backlog_usd += usd_value;
+                state.deposit_pending = true;
             }
         }
         paper::FlowKind::Withdrawal => state.net_deposits_usd -= usd_value,
@@ -726,75 +727,6 @@ fn apply_ledger_page(
     }
 }
 
-/// Invest (a share of) the deposit backlog into each coin, by its CURRENT
-/// effective target weight — see `alloc::invest_step`.
-#[allow(clippy::too_many_arguments)]
-async fn maybe_invest_backlog(
-    state: &mut paper::State,
-    mode: Mode,
-    live_gw: Option<&live::LiveKraken>,
-    client: &KrakenRestClient,
-    w: &alloc::Wallet,
-    m: alloc::Marks,
-    policy: alloc::Policy,
-    now: i64,
-    events: &mut Vec<String>,
-) {
-    if state.deposit_backlog_usd < alloc::COST_MIN_USD || !m.complete() {
-        return;
-    }
-    for pair in regime::PAIRS {
-        if has_open_order(state, pair) {
-            continue;
-        }
-        let Some(bull) = state.regime_bull.get(pair).copied() else {
-            continue; // no regime reading yet — wait rather than guess
-        };
-        let touch = match fetch_touch(client, pair).await {
-            Ok(t) => t,
-            Err(e) => {
-                warn!("deposit-invest ticker {pair}: {e:#}");
-                continue;
-            }
-        };
-        let eff = alloc::effective_weight(pair, bull);
-        invest_one_pair(
-            state, mode, live_gw, w, pair, eff, touch, policy, now, events,
-        )
-        .await;
-    }
-}
-
-/// The decide-and-place half of `maybe_invest_backlog`, split out so it can
-/// be unit tested against a hand-built `Touch` with no network call.
-#[allow(clippy::too_many_arguments)]
-async fn invest_one_pair(
-    state: &mut paper::State,
-    mode: Mode,
-    live_gw: Option<&live::LiveKraken>,
-    w: &alloc::Wallet,
-    pair: &str,
-    eff_weight: f64,
-    touch: alloc::Touch,
-    policy: alloc::Policy,
-    now: i64,
-    events: &mut Vec<String>,
-) {
-    let Some(r) = alloc::invest_step(w, pair, eff_weight, state.deposit_backlog_usd, touch) else {
-        return;
-    };
-    if !policy.armed {
-        info!(
-            "FROZEN — would invest ${:.2} of the backlog into {pair}",
-            r.qty * r.price
-        );
-        return;
-    }
-    if let Some(order) = place_rebalance(mode, live_gw, &r, Purpose::Deposit, now, events).await {
-        state.pending_orders.push(order);
-    }
-}
-
 /// Read each coin's regime from its closed daily candles, once per UTC day,
 /// not before 00:05 UTC (the daily candle closes at 00:00 and a few minutes'
 /// buffer avoids trusting it the instant it rolls over). Updates
@@ -865,7 +797,9 @@ async fn maybe_read_regime(
 
 /// Close each pair's gap to its effective target while `regime_applied`
 /// disagrees with `regime_bull` — see `alloc.rs`'s module docs for why this
-/// is the entire "no drift rebalancing" mechanism.
+/// is the entire "no drift rebalancing" mechanism. While `deposit_pending`,
+/// ALSO tops up (buy-only) every pair that is already applied, so fresh
+/// deposit cash flows into whatever it makes underweight.
 #[allow(clippy::too_many_arguments)]
 async fn maybe_close_gaps(
     state: &mut paper::State,
@@ -878,12 +812,14 @@ async fn maybe_close_gaps(
     now: i64,
     events: &mut Vec<String>,
 ) {
+    let mut any_deposit_buy_this_tick = false;
     for pair in regime::PAIRS {
         let Some(bull) = state.regime_bull.get(pair).copied() else {
             continue;
         };
-        if state.regime_applied.get(pair).copied() == Some(bull) {
-            continue; // nothing outstanding — ordinary drift is left alone
+        let applied = state.regime_applied.get(pair).copied() == Some(bull);
+        if applied && !state.deposit_pending {
+            continue; // nothing outstanding and no deposit to invest
         }
         if has_open_order(state, pair) {
             continue; // one open order per pair — wait for it to settle
@@ -895,11 +831,94 @@ async fn maybe_close_gaps(
                 continue;
             }
         };
-        close_one_gap(
-            state, mode, live_gw, w, m, touch, pair, bull, policy, now, events,
-        )
-        .await;
+        if applied {
+            if deposit_top_up_pair(
+                state, mode, live_gw, w, m, touch, pair, bull, policy, now, events,
+            )
+            .await
+            {
+                any_deposit_buy_this_tick = true;
+            }
+        } else {
+            close_one_gap(
+                state, mode, live_gw, w, m, touch, pair, bull, policy, now, events,
+            )
+            .await;
+        }
     }
+    maybe_clear_deposit_pending(state, w, any_deposit_buy_this_tick, events);
+}
+
+/// For a pair whose regime is ALREADY applied (no flip outstanding): while
+/// `deposit_pending`, size it against its effective target anyway — fresh
+/// cash makes an up-to-date pair's weight look smaller against the bigger
+/// total — but act ONLY on a buy. A sell here would mean ordinary price
+/// drift pushed the pair over its target, which is exactly the drift this
+/// policy otherwise leaves alone; a deposit must never be the reason an
+/// untouched pair gets sold. Returns whether a buy was wanted this tick
+/// (placed or not), which is what `maybe_clear_deposit_pending` needs to
+/// know "is there still work to do" rather than "did Kraken accept it."
+#[allow(clippy::too_many_arguments)]
+async fn deposit_top_up_pair(
+    state: &mut paper::State,
+    mode: Mode,
+    live_gw: Option<&live::LiveKraken>,
+    w: &alloc::Wallet,
+    m: alloc::Marks,
+    touch: alloc::Touch,
+    pair: &str,
+    bull: bool,
+    policy: alloc::Policy,
+    now: i64,
+    events: &mut Vec<String>,
+) -> bool {
+    let r = match alloc::gap_step(w, m, touch, pair, bull) {
+        alloc::GapStep::Order(r) if r.side > 0 => r,
+        _ => return false, // AtTarget / NotYet / Unpriced / a sell: not ours to act on
+    };
+    events.push(format!(
+        "{pair}: investing a deposit toward its (already-applied) target"
+    ));
+    if !policy.armed {
+        info!(
+            "FROZEN — would invest ${:.2} into {pair} from a deposit",
+            r.qty * r.price
+        );
+        return true;
+    }
+    if let Some(order) = place_rebalance(mode, live_gw, &r, Purpose::DepositBuy, now, events).await
+    {
+        state.pending_orders.push(order);
+    }
+    true
+}
+
+/// Clear `deposit_pending` once there is nothing left it could still do: no
+/// pair wanted (or could afford) a top-up buy this tick, no USDC/USDT
+/// balance is still waiting on `stable_sell`, and no deposit-buy order is
+/// currently open (one placed on an earlier tick, still awaiting fill or
+/// settlement, must not be abandoned just because THIS tick's pass over the
+/// other pairs found nothing new to do).
+fn maybe_clear_deposit_pending(
+    state: &mut paper::State,
+    w: &alloc::Wallet,
+    any_deposit_buy_this_tick: bool,
+    events: &mut Vec<String>,
+) {
+    if !state.deposit_pending || any_deposit_buy_this_tick {
+        return;
+    }
+    let stable_awaiting_conversion = w.usdc >= alloc::MIN_STABLE || w.usdt >= alloc::MIN_STABLE;
+    let deposit_order_open = state.pending_orders.iter().any(|o| {
+        o.book.as_deref().and_then(Purpose::parse).map(|(p, _)| p) == Some(Purpose::DepositBuy)
+    });
+    if stable_awaiting_conversion || deposit_order_open {
+        return;
+    }
+    state.deposit_pending = false;
+    let msg = "deposit investing complete — deposit_pending cleared".to_string();
+    info!("{msg}");
+    events.push(msg);
 }
 
 /// The decide-and-place half of `maybe_close_gaps`, split out so it can be
@@ -1263,39 +1282,20 @@ fn settle_one(
         return;
     };
     match purpose {
-        Purpose::Rebalance => {
+        // Both a flip/migration/command rebalance and a deposit top-up buy
+        // settle the same way: there is no separate tally to reduce (the
+        // deposit backlog this used to decrement is gone — see alloc.rs's
+        // module docs), so a fill just needs its retry/partial-fill message,
+        // and the ledger entry above already recorded the real money.
+        Purpose::Rebalance | Purpose::DepositBuy => {
             if order.qty > 0.0 && got <= 1e-9 {
-                let msg = format!(
-                    "{pair} rebalance order {} never filled — will retry",
-                    order.txid
-                );
+                let msg = format!("{pair} order {} never filled — will retry", order.txid);
                 info!("{msg}");
                 events.push(msg);
             } else if got + 1e-9 < order.qty {
                 let msg = format!(
-                    "{pair} rebalance PARTIAL fill {got:.8} of {:.8} — the remainder is retried",
+                    "{pair} PARTIAL fill {got:.8} of {:.8} — the remainder is retried",
                     order.qty
-                );
-                info!("{msg}");
-                events.push(msg);
-            }
-        }
-        Purpose::Deposit => {
-            if got > 1e-9 {
-                // Reduced by what actually FILLED (cost + fee), never by
-                // what was ordered — the hard rule this exists to satisfy.
-                let filled_usd = exec.cost + exec.fee;
-                state.deposit_backlog_usd = (state.deposit_backlog_usd - filled_usd).max(0.0);
-                let msg = format!(
-                    "backlog {pair} buy filled {got:.8} (${filled_usd:.2}) — backlog now ${:.2}",
-                    state.deposit_backlog_usd
-                );
-                info!("{msg}");
-                events.push(msg);
-            } else {
-                let msg = format!(
-                    "backlog {pair} buy {} never filled — will retry",
-                    order.txid
                 );
                 info!("{msg}");
                 events.push(msg);
@@ -1418,7 +1418,7 @@ mod work_tick_tests {
     fn purpose_tags_round_trip_through_the_pending_order_book_field() {
         for (p, pair) in [
             (Purpose::Rebalance, "XBTUSD"),
-            (Purpose::Deposit, "ETHUSD"),
+            (Purpose::DepositBuy, "ETHUSD"),
             (Purpose::Stable, "USDCUSD"),
         ] {
             let tag = p.tag(pair);
@@ -1633,9 +1633,50 @@ mod work_tick_tests {
         }
     }
 
+    #[tokio::test]
+    async fn deposit_pending_never_sells_an_applied_pair_that_drifted_overweight() {
+        // ETH is "applied" (no flip outstanding) but has drifted ABOVE its
+        // target through ordinary price appreciation — exactly the drift
+        // this policy otherwise leaves alone. A deposit sitting elsewhere
+        // must never turn that drift into a sell: `deposit_top_up_pair` is
+        // BUY-ONLY, full stop.
+        let mut s = paper::State::default_paper();
+        s.deposit_pending = true;
+        s.regime_bull.insert("ETHUSD".into(), true);
+        s.regime_applied.insert("ETHUSD".into(), true);
+        let m = marks();
+        let w = alloc::Wallet {
+            usd: 10.0,
+            eth: 10.0, // $27,000 of ETH — way past its 25% target
+            ..alloc::Wallet::default()
+        };
+        let touch = touch_at(m.eth);
+        let mut events = Vec::new();
+        let wanted = deposit_top_up_pair(
+            &mut s,
+            Mode::LiveDry,
+            None,
+            &w,
+            m,
+            touch,
+            "ETHUSD",
+            true,
+            alloc::Policy::LIVE,
+            0,
+            &mut events,
+        )
+        .await;
+        assert!(
+            !wanted,
+            "an overweight applied pair must not be sold to fund a deposit"
+        );
+        assert!(s.pending_orders.is_empty());
+        assert!(!events.iter().any(|e| e.contains("investing a deposit")));
+    }
+
     // ── invariant: FROZEN places nothing ───────────────────────────────────
 
-    /// Drives `close_one_gap` / `invest_one_pair` / `convert_one_stable`
+    /// Drives `close_one_gap` / `deposit_top_up_pair` / `convert_one_stable`
     /// directly with hand-built `Touch` values and `Mode::LiveDry` +
     /// `live_gw: None` — the same combination `place_rebalance` treats as
     /// "log WOULD PLACE, place nothing", so these calls make no network
@@ -1656,7 +1697,7 @@ mod work_tick_tests {
             usdc: 50.0,
             ..alloc::Wallet::default()
         };
-        s.deposit_backlog_usd = 100.0;
+        s.deposit_pending = true;
         let mut events = Vec::new();
 
         for pair in regime::PAIRS {
@@ -1678,14 +1719,15 @@ mod work_tick_tests {
                 &mut events,
             )
             .await;
-            invest_one_pair(
+            deposit_top_up_pair(
                 &mut s,
                 Mode::LiveDry,
                 None,
                 &w,
-                pair,
-                0.9,
+                m,
                 touch,
+                pair,
+                true,
                 alloc::Policy::FROZEN,
                 0,
                 &mut events,
@@ -1758,16 +1800,19 @@ mod work_tick_tests {
 
     // ── a whole day, simulated with hand-fed wallet/marks/touch — no network ──
 
-    #[test]
-    fn a_hundred_dollar_usd_deposit_is_invested_by_effective_weight() {
+    #[tokio::test]
+    async fn a_hundred_dollar_usd_deposit_is_invested_by_effective_weight() {
         let mut s = paper::State::default_paper();
         s.policy_version = 2;
-        s.deposit_backlog_usd = 0.0;
-        s.regime_bull.insert("XBTUSD".into(), true);
-        s.regime_bull.insert("ETHUSD".into(), true);
-        s.regime_bull.insert("SOLUSD".into(), true);
-        let mut events = Vec::new();
         let m = marks();
+        // The account is already at its targets (every pair "applied")
+        // before the deposit lands — otherwise this would just be an
+        // ordinary flip, not the deposit-driven buy-only path.
+        for pair in regime::PAIRS {
+            s.regime_bull.insert(pair.to_string(), true);
+            s.regime_applied.insert(pair.to_string(), true);
+        }
+        let mut events = Vec::new();
 
         // Detect the deposit.
         assert!(apply_ledger_entry(
@@ -1779,54 +1824,46 @@ mod work_tick_tests {
             100.0,
             m
         ));
-        assert_eq!(s.deposit_backlog_usd, 100.0);
+        assert!(s.deposit_pending, "a USD deposit must set deposit_pending");
         assert_eq!(s.net_deposits_usd, 100.0);
 
-        // Invest it across BTC/ETH/SOL by today's (all-bull) effective
-        // weights — sized against a wallet with the backlog as free cash.
+        // The fresh $100 sits as free USD, making every pair underweight
+        // against the now-bigger total — each gets topped up, buy-only.
         let w = alloc::Wallet {
             usd: 100.0,
             ..alloc::Wallet::default()
         };
+        let mut any_buy = false;
         for pair in regime::PAIRS {
-            let eff = alloc::effective_weight(pair, true);
             let touch = touch_at(m.of(pair));
-            if let Some(r) = alloc::invest_step(&w, pair, eff, s.deposit_backlog_usd, touch) {
-                assert_eq!(r.side, 1);
-                // Settle it in full and confirm the backlog shrinks by
-                // exactly the filled cost+fee, not by what was "wanted".
-                let cost = r.qty * r.price;
-                let fee = cost * 0.004;
-                let order = paper::PendingOrder {
-                    txid: format!("O-{pair}"),
-                    pair: pair.to_string(),
-                    side: 1,
-                    placed_at: 0,
-                    book: Some(Purpose::Deposit.tag(pair)),
-                    qty: r.qty,
-                };
-                let exec = ledger::Execution {
-                    vol_exec: r.qty,
-                    cost,
-                    fee,
-                    at: Some(1),
-                };
-                let before = s.deposit_backlog_usd;
-                settle_one(&mut s, &order, exec, 1, &mut events);
-                assert!((before - s.deposit_backlog_usd - (cost + fee)).abs() < 1e-9);
+            if deposit_top_up_pair(
+                &mut s,
+                Mode::LiveDry,
+                None,
+                &w,
+                m,
+                touch,
+                pair,
+                true,
+                alloc::Policy::LIVE,
+                0,
+                &mut events,
+            )
+            .await
+            {
+                any_buy = true;
             }
         }
-        assert!(
-            s.deposit_backlog_usd < 100.0,
-            "something must have been invested"
-        );
-        assert!(s.deposit_backlog_usd > -1e-9);
+        assert!(any_buy, "something must have wanted the deposit cash");
+        assert!(events.iter().any(|e| e.contains("investing a deposit")));
     }
 
-    #[test]
-    fn a_usdc_deposit_is_converted_then_invested() {
+    #[tokio::test]
+    async fn a_usdc_deposit_is_converted_then_invested() {
         let mut s = paper::State::default_paper();
         let m = marks();
+        s.regime_bull.insert("ETHUSD".into(), true);
+        s.regime_applied.insert("ETHUSD".into(), true);
         assert!(apply_ledger_entry(
             &mut s,
             "LDEP2",
@@ -1836,23 +1873,37 @@ mod work_tick_tests {
             50.0,
             m
         ));
-        assert_eq!(
-            s.deposit_backlog_usd, 50.0,
-            "a USDC deposit backs the SAME backlog as USD"
+        assert!(
+            s.deposit_pending,
+            "a USDC deposit must ALSO set deposit_pending"
         );
         assert_eq!(s.net_deposits_usd, 50.0);
 
         // The wallet actually holds USDC, not USD, until `stable_sell` + its
-        // settlement convert it — invest_step should not be fed from USDC
-        // directly (it spends `usd_available`), so nothing should be wanted
-        // from a wallet with zero free USD even though the backlog is $50.
+        // settlement convert it — the top-up reads `usd_available()`, which
+        // does not include USDC, so nothing is wanted yet.
         let w_before_convert = alloc::Wallet {
             usd: 0.0,
             usdc: 50.0,
             ..alloc::Wallet::default()
         };
+        let mut events = Vec::new();
         assert!(
-            alloc::invest_step(&w_before_convert, "ETHUSD", 0.9, 50.0, touch_at(m.eth)).is_none()
+            !deposit_top_up_pair(
+                &mut s,
+                Mode::LiveDry,
+                None,
+                &w_before_convert,
+                m,
+                touch_at(m.eth),
+                "ETHUSD",
+                true,
+                alloc::Policy::LIVE,
+                0,
+                &mut events,
+            )
+            .await,
+            "USDC is not spendable cash until it is converted"
         );
 
         // Convert: sell the USDC balance.
@@ -1861,7 +1912,6 @@ mod work_tick_tests {
         assert_eq!(r.side, -1);
         let got = r.qty;
         let cost = got * r.price;
-        let fee = 0.0;
         let order = paper::PendingOrder {
             txid: "O-USDC".into(),
             pair: "USDCUSD".into(),
@@ -1870,35 +1920,40 @@ mod work_tick_tests {
             book: Some(Purpose::Stable.tag("USDCUSD")),
             qty: got,
         };
-        let mut events = Vec::new();
         settle_one(
             &mut s,
             &order,
             ledger::Execution {
                 vol_exec: got,
                 cost,
-                fee,
+                fee: 0.0,
                 at: Some(2),
             },
             2,
             &mut events,
         );
         // Now the wallet (as Kraken would report it next tick) holds USD
-        // instead, and investing from the still-open backlog works.
+        // instead, and the top-up finds it.
         let w_after_convert = alloc::Wallet {
             usd: cost,
             usdc: 0.0,
             ..alloc::Wallet::default()
         };
-        let invested = alloc::invest_step(
-            &w_after_convert,
-            "ETHUSD",
-            0.9,
-            s.deposit_backlog_usd,
-            touch_at(m.eth),
-        );
         assert!(
-            invested.is_some(),
+            deposit_top_up_pair(
+                &mut s,
+                Mode::LiveDry,
+                None,
+                &w_after_convert,
+                m,
+                touch_at(m.eth),
+                "ETHUSD",
+                true,
+                alloc::Policy::LIVE,
+                0,
+                &mut events,
+            )
+            .await,
             "the converted USD must now be investable"
         );
     }
@@ -1998,15 +2053,20 @@ mod work_tick_tests {
     }
 
     #[test]
-    fn a_partial_fill_reduces_the_deposit_backlog_by_the_filled_amount_only() {
+    fn a_partial_fill_on_a_deposit_buy_is_logged_and_the_remainder_retried() {
+        // There is no backlog counter left to reduce (see alloc.rs's module
+        // docs) — a deposit-buy's partial fill settles exactly like an
+        // ordinary rebalance's: the real fill goes to the ledger, and the
+        // shortfall is simply left for the next tick's fresh `gap_step` to
+        // notice and re-order, sized off the wallet as it actually stands.
         let mut s = paper::State::default_paper();
-        s.deposit_backlog_usd = 100.0;
+        s.live.since = "2026-10-05".into();
         let order = paper::PendingOrder {
             txid: "OPARTIAL".into(),
             pair: "ETHUSD".into(),
             side: 1,
             placed_at: 0,
-            book: Some(Purpose::Deposit.tag("ETHUSD")),
+            book: Some(Purpose::DepositBuy.tag("ETHUSD")),
             qty: 0.01,
         };
         // Ordered $27-ish of ETH, only a THIRD filled.
@@ -2019,15 +2079,17 @@ mod work_tick_tests {
         let mut events = Vec::new();
         settle_one(&mut s, &order, exec, 5, &mut events);
         assert!(
-            (s.deposit_backlog_usd - (100.0 - 9.036)).abs() < 1e-9,
-            "backlog {}",
-            s.deposit_backlog_usd
+            events
+                .iter()
+                .any(|e| e.contains("PARTIAL fill 0.00330000 of 0.01000000")),
+            "{events:?}"
         );
-        assert!(events.iter().any(|e| e.contains("backlog")));
-
-        // Reduced by what FILLED, never by what was ORDERED: a full-size
-        // reduction would have taken it to ~73, not ~91.
-        assert!(s.deposit_backlog_usd > 90.0 && s.deposit_backlog_usd < 92.0);
+        // The REAL fill (cost + fee) landed on the ledger regardless.
+        let p = s
+            .live
+            .get(ledger::Sleeve::Trade, "ETHUSD")
+            .expect("a ledger slot");
+        assert!((p.basis_usd - (9.0 + 0.036)).abs() < 1e-9);
     }
 
     #[test]
@@ -2037,13 +2099,17 @@ mod work_tick_tests {
         assert!(apply_ledger_entry(
             &mut s, "LDUP", 100, "deposit", "ZUSD", 50.0, m
         ));
-        assert_eq!(s.deposit_backlog_usd, 50.0);
+        assert!(s.deposit_pending);
         // The SAME refid, re-offered (a re-fetched page after a restart, or
         // simply Kraken's `start` boundary tying on the same second).
+        s.deposit_pending = false; // reset, so a double-count would re-set it
         assert!(!apply_ledger_entry(
             &mut s, "LDUP", 100, "deposit", "ZUSD", 50.0, m
         ));
-        assert_eq!(s.deposit_backlog_usd, 50.0, "must not be counted twice");
+        assert!(
+            !s.deposit_pending,
+            "a duplicate refid must not re-arm investing"
+        );
         assert_eq!(s.flows.len(), 1);
     }
 
@@ -2054,6 +2120,7 @@ mod work_tick_tests {
         assert!(apply_ledger_entry(
             &mut s, "LDEP", 100, "deposit", "ZUSD", 200.0, m
         ));
+        s.deposit_pending = false; // simulate: already fully invested
         assert!(apply_ledger_entry(
             &mut s,
             "LWD",
@@ -2064,25 +2131,25 @@ mod work_tick_tests {
             m
         ));
         assert_eq!(s.net_deposits_usd, 125.0);
-        assert_eq!(
-            s.deposit_backlog_usd, 200.0,
-            "a withdrawal never touches the invest backlog"
+        assert!(
+            !s.deposit_pending,
+            "a withdrawal never re-arms deposit investing"
         );
         assert_eq!(s.flows.len(), 2);
         assert_eq!(s.flows[1].kind, paper::FlowKind::Withdrawal);
     }
 
     #[test]
-    fn a_crypto_deposit_counts_for_performance_but_is_not_added_to_the_backlog() {
+    fn a_crypto_deposit_counts_for_performance_but_never_sets_deposit_pending() {
         let mut s = paper::State::default_paper();
         let m = marks();
         assert!(apply_ledger_entry(
             &mut s, "LBTC", 100, "deposit", "XXBT", 0.01, m
         ));
         assert!((s.net_deposits_usd - 0.01 * m.btc).abs() < 1e-6);
-        assert_eq!(
-            s.deposit_backlog_usd, 0.0,
-            "BTC arriving is already invested — nothing to spend"
+        assert!(
+            !s.deposit_pending,
+            "BTC arriving is already invested — nothing to buy"
         );
     }
 

@@ -25,7 +25,11 @@
 //!
 //! 1. its own regime flipping (`gap_step`, below),
 //! 2. the one-time move onto this policy (`State::policy_version`),
-//! 3. investing a deposit (`invest_step`),
+//! 3. a deposit being invested (`State::deposit_pending`, `main.rs`'s
+//!    `deposit_top_up_pair` — a BUY-ONLY reuse of `gap_step` on pairs whose
+//!    regime is already applied, so fresh cash flows into whatever it made
+//!    underweight without ever selling a pair drift alone would leave
+//!    untouched),
 //! 4. the operator's explicit `rebalance` command.
 //!
 //! All four size the SAME way: the gap, in dollars, between what a coin is
@@ -381,45 +385,6 @@ pub fn gap_step(w: &Wallet, m: Marks, touch: Touch, pair: &str, bull: bool) -> G
     })
 }
 
-/// What to buy with (a share of) the deposit backlog for one coin.
-///
-/// `eff_weight` is the coin's CURRENT effective target weight — the backlog
-/// is spread by today's weights, not the bull-floor ones, so a deposit that
-/// lands mid-bear still buys a smaller core-sized slice of that coin rather
-/// than overfilling it. Capped by free USD like every other buy, so a
-/// backlog larger than the account's spare cash is simply invested over
-/// several ticks as fills reduce it (see `main.rs`).
-pub fn invest_step(
-    w: &Wallet,
-    pair: &str,
-    eff_weight: f64,
-    backlog_usd: f64,
-    touch: Touch,
-) -> Option<Rebalance> {
-    if !touch.complete() || backlog_usd <= 0.0 || eff_weight <= 0.0 {
-        return None;
-    }
-    let pair: &'static str = match pair {
-        "XBTUSD" => "XBTUSD",
-        "ETHUSD" => "ETHUSD",
-        "SOLUSD" => "SOLUSD",
-        _ => return None,
-    };
-    let want = backlog_usd * eff_weight;
-    let spend = want.min(w.usd_available());
-    let price = touch.bid;
-    let q = floor_qty(spend / price);
-    if q < Wallet::min_qty(pair) || spend < COST_MIN_USD {
-        return None;
-    }
-    Some(Rebalance {
-        pair,
-        side: 1,
-        qty: q,
-        price,
-    })
-}
-
 /// Sell a USDC or USDT balance to USD, post-only at the ask, if it is at or
 /// above Kraken's ordermin of 5. Sells the WHOLE balance (floored to
 /// Kraken's precision) — there is no target to leave any of it at, unlike a
@@ -744,46 +709,8 @@ mod tests {
                 ),
                 "{bad:?}"
             );
-            assert!(invest_step(&w, "XBTUSD", 0.5, 100.0, bad).is_none());
             assert!(stable_sell(10.0, "USDCUSD", bad).is_none());
         }
-    }
-
-    #[test]
-    fn invest_step_spreads_a_deposit_by_todays_effective_weight() {
-        let w = Wallet {
-            usd: 1_000.0,
-            ..Wallet::default()
-        };
-        let t = touch(marks().eth, marks().eth + 0.1);
-        // A bear ETH gets half the bull-floor slice of the same backlog.
-        let bull = invest_step(&w, "ETHUSD", effective_weight("ETHUSD", true), 100.0, t).unwrap();
-        let bear = invest_step(&w, "ETHUSD", effective_weight("ETHUSD", false), 100.0, t).unwrap();
-        assert!(
-            (bull.qty - 2.0 * bear.qty).abs() < 1e-6,
-            "bull {} should be ~2x bear {}",
-            bull.qty,
-            bear.qty
-        );
-        assert!(
-            (bull.qty * bull.price - 25.0).abs() < 0.5,
-            "bull spend should be ~25% of the $100 backlog"
-        );
-    }
-
-    #[test]
-    fn invest_step_never_spends_more_than_is_available() {
-        let w = Wallet {
-            usd: 1.0,
-            usd_held: 0.5,
-            ..Wallet::default()
-        };
-        let t = touch(marks().btc, marks().btc + 1.0);
-        // A huge backlog, a nearly-empty wallet.
-        assert!(
-            invest_step(&w, "XBTUSD", 0.5, 10_000.0, t).is_none(),
-            "50 cents free cannot clear costmin"
-        );
     }
 
     #[test]

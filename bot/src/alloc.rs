@@ -334,11 +334,26 @@ pub enum GapStep {
 /// Size one pair to `effective_weight(pair, bull) * total`, priced at the
 /// touch so the result can be placed post-only.
 ///
+/// `spendable` is the USD this call may commit to a buy — ordinarily
+/// `w.usd_available()`, but when a tick makes more than one `gap_step` call
+/// (gap-closing AND a deposit top-up can both want to buy in the same
+/// tick), the caller threads a single running total through every call,
+/// decremented as each buy is decided, so two pairs can never size against
+/// the same dollars. The sell branch never reads this — a sell is capped
+/// by what is held, not by cash.
+///
 /// See the module docs for when this is called: only while `regime_applied`
 /// disagrees with `regime_bull` for this pair, which is also the fact that
 /// keeps this safe to call every tick without rebalancing ordinary drift —
 /// once `AtTarget`, the caller stops disagreeing and stops calling this.
-pub fn gap_step(w: &Wallet, m: Marks, touch: Touch, pair: &str, bull: bool) -> GapStep {
+pub fn gap_step(
+    w: &Wallet,
+    m: Marks,
+    touch: Touch,
+    pair: &str,
+    bull: bool,
+    spendable: f64,
+) -> GapStep {
     if !m.complete() || !touch.complete() {
         return GapStep::Unpriced;
     }
@@ -355,7 +370,7 @@ pub fn gap_step(w: &Wallet, m: Marks, touch: Touch, pair: &str, bull: bool) -> G
     let min_q = Wallet::min_qty(pair);
     if delta > 0.0 {
         let price = touch.bid;
-        let spend = delta.min(w.usd_available() * FEE_RESERVE);
+        let spend = delta.min(spendable.max(0.0) * FEE_RESERVE);
         let q = floor_qty(spend / price);
         if q < min_q || spend < COST_MIN_USD {
             // Distinguish "already there" (the UNCAPPED gap is itself below
@@ -504,13 +519,13 @@ mod tests {
     fn migration_sells_btc_and_buys_eth_and_sol() {
         let w = pre_migration_wallet();
         let t = touch(marks().btc - 1.0, marks().btc + 1.0);
-        match gap_step(&w, marks(), t, "XBTUSD", true) {
+        match gap_step(&w, marks(), t, "XBTUSD", true, w.usd_available()) {
             GapStep::Order(r) => assert_eq!(r.side, -1, "56% must sell down toward 50%"),
             other => panic!("{other:?}"),
         }
         for pair in ["ETHUSD", "SOLUSD"] {
             let t = touch(marks().of(pair) - 0.1, marks().of(pair) + 0.1);
-            match gap_step(&w, marks(), t, pair, true) {
+            match gap_step(&w, marks(), t, pair, true, w.usd_available()) {
                 GapStep::Order(r) => {
                     assert_eq!(r.side, 1, "{pair} at 10% must buy up toward its target")
                 }
@@ -532,7 +547,10 @@ mod tests {
         for pair in crate::regime::PAIRS {
             let t = touch(marks().of(pair), marks().of(pair));
             assert!(
-                matches!(gap_step(&w, marks(), t, pair, true), GapStep::AtTarget),
+                matches!(
+                    gap_step(&w, marks(), t, pair, true, w.usd_available()),
+                    GapStep::AtTarget
+                ),
                 "{pair}"
             );
         }
@@ -551,7 +569,7 @@ mod tests {
         };
         let t = touch(marks().eth - 0.1, marks().eth + 0.1);
         assert!(matches!(
-            gap_step(&w, marks(), t, "ETHUSD", false),
+            gap_step(&w, marks(), t, "ETHUSD", false, w.usd_available()),
             GapStep::AtTarget
         ));
 
@@ -560,7 +578,9 @@ mod tests {
         let mut richer = w.clone();
         richer.eth *= 2.0;
         richer.usd -= core_usd;
-        if let GapStep::Order(r) = gap_step(&richer, marks(), t, "ETHUSD", false) {
+        if let GapStep::Order(r) =
+            gap_step(&richer, marks(), t, "ETHUSD", false, richer.usd_available())
+        {
             assert_eq!(r.side, -1);
             let after = richer.eth - r.qty;
             assert!(
@@ -583,7 +603,7 @@ mod tests {
             ..Wallet::default()
         };
         let t = touch(marks().btc - 1.0, marks().btc + 1.0);
-        if let GapStep::Order(r) = gap_step(&w, marks(), t, "XBTUSD", true) {
+        if let GapStep::Order(r) = gap_step(&w, marks(), t, "XBTUSD", true, w.usd_available()) {
             assert_eq!(r.side, 1);
             assert!(
                 r.qty * r.price <= w.usd_available() + 1e-9,
@@ -608,7 +628,7 @@ mod tests {
             ..Wallet::default()
         };
         let t = touch(99.0, 100.0); // well below marks().sol == 120.0
-        match gap_step(&w, marks(), t, "SOLUSD", false) {
+        match gap_step(&w, marks(), t, "SOLUSD", false, w.usd_available()) {
             GapStep::Order(r) => {
                 assert_eq!(r.side, -1);
                 assert!(r.qty <= w.sol + 1e-12, "sold {} of {} held", r.qty, w.sol);
@@ -630,7 +650,7 @@ mod tests {
         };
         let t = touch(marks().sol - 0.01, marks().sol + 0.01);
         assert!(matches!(
-            gap_step(&w, marks(), t, "SOLUSD", false),
+            gap_step(&w, marks(), t, "SOLUSD", false, w.usd_available()),
             GapStep::AtTarget
         ));
 
@@ -651,7 +671,14 @@ mod tests {
         let t_tiny = touch(1.0, 1.0);
         assert!(
             matches!(
-                gap_step(&w_tiny, cheap_sol, t_tiny, "SOLUSD", true),
+                gap_step(
+                    &w_tiny,
+                    cheap_sol,
+                    t_tiny,
+                    "SOLUSD",
+                    true,
+                    w_tiny.usd_available()
+                ),
                 GapStep::AtTarget
             ),
             "a $0.30 gap must be refused on costmin alone"
@@ -690,7 +717,7 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    gap_step(&w, bad, good_touch, "XBTUSD", true),
+                    gap_step(&w, bad, good_touch, "XBTUSD", true, w.usd_available()),
                     GapStep::Unpriced
                 ),
                 "{bad:?}"
@@ -709,7 +736,7 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    gap_step(&w, marks(), bad, "XBTUSD", true),
+                    gap_step(&w, marks(), bad, "XBTUSD", true, w.usd_available()),
                     GapStep::Unpriced
                 ),
                 "{bad:?}"
@@ -743,7 +770,7 @@ mod tests {
             ..Wallet::default()
         };
         let t = touch(marks().btc, marks().btc);
-        match gap_step(&w, marks(), t, "XBTUSD", true) {
+        match gap_step(&w, marks(), t, "XBTUSD", true, w.usd_available()) {
             GapStep::Order(r) => {
                 let spend = r.qty * r.price;
                 assert!(
@@ -776,6 +803,7 @@ mod tests {
             t,
             "XBTUSD",
             true,
+            w.usd_available(),
         ) {
             assert_eq!(r.side, 1);
             assert_eq!(r.price, 100.0, "a buy prices at the BID touch");
@@ -801,6 +829,7 @@ mod tests {
             t,
             "XBTUSD",
             false,
+            rich.usd_available(),
         ) {
             assert_eq!(r.side, -1);
             assert_eq!(r.price, 101.0, "a sell prices at the ASK touch");

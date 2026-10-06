@@ -834,6 +834,16 @@ async fn maybe_close_gaps(
     now: i64,
     events: &mut Vec<String>,
 ) {
+    // ONE snapshot per tick: stable conversion (not a buy, so untouched by
+    // this), gap-closing and deposit top-ups all read the SAME `w`, so
+    // without a shared running total two pairs could each size a buy
+    // against the full free cash and together overspend it. Started at the
+    // raw `usd_available()` — `gap_step` applies `FEE_RESERVE` itself —
+    // and decremented by each buy's cost as soon as it is DECIDED, whether
+    // or not it is actually placed (FROZEN, or Kraken rejects it): the
+    // point is that no later pair in this same tick sizes against dollars
+    // an earlier pair already committed to.
+    let mut spendable = w.usd_available();
     let mut any_deposit_buy_this_tick = false;
     for pair in regime::PAIRS {
         let Some(bull) = state.regime_bull.get(pair).copied() else {
@@ -855,7 +865,18 @@ async fn maybe_close_gaps(
         };
         if applied {
             if deposit_top_up_pair(
-                state, mode, live_gw, w, m, touch, pair, bull, policy, now, events,
+                state,
+                mode,
+                live_gw,
+                w,
+                m,
+                touch,
+                pair,
+                bull,
+                policy,
+                &mut spendable,
+                now,
+                events,
             )
             .await
             {
@@ -863,7 +884,18 @@ async fn maybe_close_gaps(
             }
         } else {
             close_one_gap(
-                state, mode, live_gw, w, m, touch, pair, bull, policy, now, events,
+                state,
+                mode,
+                live_gw,
+                w,
+                m,
+                touch,
+                pair,
+                bull,
+                policy,
+                &mut spendable,
+                now,
+                events,
             )
             .await;
         }
@@ -891,13 +923,15 @@ async fn deposit_top_up_pair(
     pair: &str,
     bull: bool,
     policy: alloc::Policy,
+    spendable: &mut f64,
     now: i64,
     events: &mut Vec<String>,
 ) -> bool {
-    let r = match alloc::gap_step(w, m, touch, pair, bull) {
+    let r = match alloc::gap_step(w, m, touch, pair, bull, *spendable) {
         alloc::GapStep::Order(r) if r.side > 0 => r,
         _ => return false, // AtTarget / NotYet / Unpriced / a sell: not ours to act on
     };
+    *spendable -= r.qty * r.price;
     events.push(format!(
         "{pair}: investing a deposit toward its (already-applied) target"
     ));
@@ -956,10 +990,11 @@ async fn close_one_gap(
     pair: &str,
     bull: bool,
     policy: alloc::Policy,
+    spendable: &mut f64,
     now: i64,
     events: &mut Vec<String>,
 ) {
-    match alloc::gap_step(w, m, touch, pair, bull) {
+    match alloc::gap_step(w, m, touch, pair, bull, *spendable) {
         alloc::GapStep::AtTarget => {
             info!(
                 "{pair}: at its effective target ({})",
@@ -974,6 +1009,12 @@ async fn close_one_gap(
             info!("{pair}: marks or touch incomplete — retrying next tick");
         }
         alloc::GapStep::Order(r) => {
+            // Only a BUY claims shared cash — a sell raises cash (once it
+            // settles) rather than spending it, so it never competes with
+            // another pair's buy for the SAME dollars this tick.
+            if r.side > 0 {
+                *spendable -= r.qty * r.price;
+            }
             events.push(format!(
                 "{pair}: closing gap to its effective target ({})",
                 if bull { "bull" } else { "bear" }
@@ -1674,6 +1715,7 @@ mod work_tick_tests {
         };
         let touch = touch_at(m.eth);
         let mut events = Vec::new();
+        let mut spendable = w.usd_available();
         let wanted = deposit_top_up_pair(
             &mut s,
             Mode::LiveDry,
@@ -1684,6 +1726,7 @@ mod work_tick_tests {
             "ETHUSD",
             true,
             alloc::Policy::LIVE,
+            &mut spendable,
             0,
             &mut events,
         )
@@ -1721,6 +1764,7 @@ mod work_tick_tests {
         };
         s.deposit_pending = true;
         let mut events = Vec::new();
+        let mut spendable = w.usd_available();
 
         for pair in regime::PAIRS {
             let touch = alloc::Touch {
@@ -1737,6 +1781,7 @@ mod work_tick_tests {
                 pair,
                 true,
                 alloc::Policy::FROZEN,
+                &mut spendable,
                 0,
                 &mut events,
             )
@@ -1751,6 +1796,7 @@ mod work_tick_tests {
                 pair,
                 true,
                 alloc::Policy::FROZEN,
+                &mut spendable,
                 0,
                 &mut events,
             )
@@ -1800,6 +1846,7 @@ mod work_tick_tests {
             bid: m.btc - 0.1,
             ask: m.btc + 0.1,
         };
+        let mut live_spendable = w.usd_available();
         close_one_gap(
             &mut s,
             Mode::LiveDry,
@@ -1810,6 +1857,7 @@ mod work_tick_tests {
             "XBTUSD",
             true,
             alloc::Policy::LIVE,
+            &mut live_spendable,
             0,
             &mut live_events,
         )
@@ -1856,6 +1904,7 @@ mod work_tick_tests {
             ..alloc::Wallet::default()
         };
         let mut any_buy = false;
+        let mut spendable = w.usd_available();
         for pair in regime::PAIRS {
             let touch = touch_at(m.of(pair));
             if deposit_top_up_pair(
@@ -1868,6 +1917,7 @@ mod work_tick_tests {
                 pair,
                 true,
                 alloc::Policy::LIVE,
+                &mut spendable,
                 0,
                 &mut events,
             )
@@ -1910,6 +1960,7 @@ mod work_tick_tests {
             ..alloc::Wallet::default()
         };
         let mut events = Vec::new();
+        let mut spendable_before = w_before_convert.usd_available();
         assert!(
             !deposit_top_up_pair(
                 &mut s,
@@ -1921,6 +1972,7 @@ mod work_tick_tests {
                 "ETHUSD",
                 true,
                 alloc::Policy::LIVE,
+                &mut spendable_before,
                 0,
                 &mut events,
             )
@@ -1961,6 +2013,7 @@ mod work_tick_tests {
             usdc: 0.0,
             ..alloc::Wallet::default()
         };
+        let mut spendable_after = w_after_convert.usd_available();
         assert!(
             deposit_top_up_pair(
                 &mut s,
@@ -1972,6 +2025,7 @@ mod work_tick_tests {
                 "ETHUSD",
                 true,
                 alloc::Policy::LIVE,
+                &mut spendable_after,
                 0,
                 &mut events,
             )
@@ -2019,6 +2073,69 @@ mod work_tick_tests {
         );
     }
 
+    #[tokio::test]
+    async fn two_buys_in_one_tick_share_the_same_cash_instead_of_doubling_up() {
+        // BTC already fills most of the account, so the free $1,000 is the
+        // whole story: ETH (25% of a $10,000 total = $2,500 wanted) and SOL
+        // (15% = $1,500 wanted) BOTH individually want far more than half
+        // of that $1,000 — the exact condition where sizing each against
+        // `w.usd_available()` independently would commit ~$990 TWICE,
+        // overspending the real $1,000 by nearly 2x.
+        let m = marks();
+        let w = alloc::Wallet {
+            usd: 1_000.0,
+            btc: 9_000.0 / m.btc,
+            ..alloc::Wallet::default()
+        };
+        let mut s = paper::State::default_paper();
+        let mut spendable = w.usd_available();
+        let mut events = Vec::new();
+
+        close_one_gap(
+            &mut s,
+            Mode::LiveDry,
+            None,
+            &w,
+            m,
+            touch_at(m.eth),
+            "ETHUSD",
+            true,
+            alloc::Policy::LIVE,
+            &mut spendable,
+            0,
+            &mut events,
+        )
+        .await;
+        let spent_on_eth = w.usd_available() - spendable;
+        assert!(
+            spent_on_eth > 500.0,
+            "ETH alone should claim most of the cash, got {spent_on_eth}"
+        );
+
+        close_one_gap(
+            &mut s,
+            Mode::LiveDry,
+            None,
+            &w,
+            m,
+            touch_at(m.sol),
+            "SOLUSD",
+            true,
+            alloc::Policy::LIVE,
+            &mut spendable,
+            0,
+            &mut events,
+        )
+        .await;
+        let total_spent = w.usd_available() - spendable;
+        assert!(
+            total_spent <= w.usd_available() + 1e-6,
+            "two buys in one tick spent ${total_spent:.2} against only ${:.2} available — \
+             the second must have been capped by what the first already claimed",
+            w.usd_available()
+        );
+    }
+
     #[test]
     fn a_bear_flip_then_a_bull_flip_each_resize_correctly() {
         let total = 1_000.0;
@@ -2033,7 +2150,7 @@ mod work_tick_tests {
 
         // ETH flips to bear: must sell down to its core.
         let t = touch_at(m.eth);
-        let r = match alloc::gap_step(&w, m, t, "ETHUSD", false) {
+        let r = match alloc::gap_step(&w, m, t, "ETHUSD", false, w.usd_available()) {
             alloc::GapStep::Order(r) => r,
             other => panic!("expected a sell into bear core, got {other:?}"),
         };
@@ -2041,12 +2158,12 @@ mod work_tick_tests {
         w.eth -= r.qty;
         w.usd += r.qty * r.price;
         assert!(matches!(
-            alloc::gap_step(&w, m, t, "ETHUSD", false),
+            alloc::gap_step(&w, m, t, "ETHUSD", false, w.usd_available()),
             alloc::GapStep::AtTarget
         ));
 
         // And back to bull: must buy back up to the full target.
-        let r2 = match alloc::gap_step(&w, m, t, "ETHUSD", true) {
+        let r2 = match alloc::gap_step(&w, m, t, "ETHUSD", true, w.usd_available()) {
             alloc::GapStep::Order(r) => r,
             other => panic!("expected a buy back to the bull target, got {other:?}"),
         };
@@ -2054,7 +2171,7 @@ mod work_tick_tests {
         w.eth += r2.qty;
         w.usd -= r2.qty * r2.price;
         assert!(matches!(
-            alloc::gap_step(&w, m, t, "ETHUSD", true),
+            alloc::gap_step(&w, m, t, "ETHUSD", true, w.usd_available()),
             alloc::GapStep::AtTarget
         ));
     }
@@ -2074,7 +2191,7 @@ mod work_tick_tests {
         };
 
         let stale_touch = touch_at(m.btc);
-        let first = match alloc::gap_step(&w, m, stale_touch, "XBTUSD", true) {
+        let first = match alloc::gap_step(&w, m, stale_touch, "XBTUSD", true, w.usd_available()) {
             alloc::GapStep::Order(r) => r,
             other => panic!("{other:?}"),
         };
@@ -2107,7 +2224,7 @@ mod work_tick_tests {
 
         // Next tick, price moved — the new touch is used, not the stale one.
         let new_touch = touch_at(m.btc * 1.01);
-        match alloc::gap_step(&w, m, new_touch, "XBTUSD", true) {
+        match alloc::gap_step(&w, m, new_touch, "XBTUSD", true, w.usd_available()) {
             alloc::GapStep::Order(r2) => assert_eq!(r2.price, new_touch.bid),
             other => panic!("{other:?}"),
         }

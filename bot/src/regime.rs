@@ -1,10 +1,11 @@
-//! The ETH/SOL sleeve's rule since 2026-10-04: hold each coin, and keep only
-//! half of it while the coin is in a bear regime.
+//! The trend rule run on every coin since 2026-10-05: hold each coin, and
+//! keep only half of it while the coin is in a bear regime.
 //!
-//! The 1h books it replaces lost to buy-and-hold: they caught about a fifth of
-//! the bull moves and paid tier-1 fees on every swing (docs/research.md). The
-//! operator asked instead to hold ETH and SOL and sell portions on the long
-//! bull/bear swings, holding for weeks to months.
+//! Through 2026-10-04 this ran ETH and SOL only, inside a BTC-hold-plus-
+//! trade-sleeve policy. The operator then asked for ONE account targeting
+//! BTC/ETH/SOL/cash directly (see `alloc.rs`), with the same trend rule
+//! sizing all three coins rather than two of them against a frozen BTC
+//! pile — so `PAIRS` below grew to include `XBTUSD`.
 //!
 //! `src/crypto/opt/regime.py` compared standard, untuned rules on Binance daily
 //! data (ETH from 2018, SOL from 2021) at Kraken tier-1 fees, over the whole
@@ -33,8 +34,11 @@ pub const BAND: f64 = 0.05;
 /// The share of each coin's sleeve held in a bear regime, the core that is
 /// never sold.
 pub const CORE: f64 = 0.50;
-/// The coins this rule runs, one equal share of the trade sleeve each.
-pub const PAIRS: [&str; 2] = ["ETHUSD", "SOLUSD"];
+/// The coins this rule runs: every coin the account targets.
+///
+/// **Grew from `["ETHUSD", "SOLUSD"]` to all three on 2026-10-05** — see
+/// `alloc.rs` for the account-level policy this feeds.
+pub const PAIRS: [&str; 3] = ["XBTUSD", "ETHUSD", "SOLUSD"];
 
 /// One day's reading for a coin.
 #[derive(Clone, Copy, Debug, PartialEq)]

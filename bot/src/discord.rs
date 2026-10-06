@@ -311,6 +311,15 @@ mod tests {
             pending_orders: Vec::new(),
             live: crate::ledger::LiveLedger::default(),
             paper_clean_since: String::new(),
+            policy_version: 0,
+            regime_bull: Default::default(),
+            deposit_backlog_usd: 0.0,
+            flows: Vec::new(),
+            last_ledger_time: 0.0,
+            net_deposits_usd: 0.0,
+            history: Vec::new(),
+            last_history_day: String::new(),
+            last_work_hour: String::new(),
         }
     }
 

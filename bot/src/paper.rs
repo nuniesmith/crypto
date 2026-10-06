@@ -103,18 +103,26 @@ pub struct State {
     #[serde(default)]
     pub last_monthly: String,
     /// UTC date `YYYY-MM-DD` of the last BTC rebalance actually placed.
+    ///
+    /// Vestigial since the 2026-10-05 policy (`alloc.rs`): BTC now trades on
+    /// the same regime-flip rule as every other coin, with no separate band
+    /// check. Left in the file format rather than removed — see
+    /// `State::last_work_hour` for what replaced it.
     #[serde(default)]
     pub last_btc_rebalance: String,
-    /// UTC date `YYYY-MM-DD` the regime rule last evaluated both coins.
+    /// UTC date `YYYY-MM-DD` the regime rule last evaluated every coin.
     #[serde(default)]
     pub last_regime_day: String,
-    /// The regime (true = bull) each ETH/SOL pair was last SIZED for.
+    /// The regime (true = bull) each pair was last SIZED for — i.e. fully
+    /// moved to its effective target, within one minimum order.
     ///
-    /// The rule trades only when a coin's regime changes, so this is what it
-    /// compares today's reading against. A pair missing from the map has
-    /// never been sized, and the next check sizes it. An order that never
-    /// fills removes its pair again, so the change is retried rather than
-    /// forgotten.
+    /// A pair trades only when this disagrees with `regime_bull`: an ordinary
+    /// flip changes `regime_bull` and leaves this at the old value; the
+    /// one-time policy move and the operator's `rebalance` command instead
+    /// clear this map outright, so every pair disagrees regardless of
+    /// whether its regime actually changed. Either way the work tick closes
+    /// the gap and then writes this to match, and drift after that is left
+    /// alone — see `alloc.rs`.
     #[serde(default)]
     pub regime_applied: std::collections::BTreeMap<String, bool>,
     /// Live limit orders this bot placed that have not been seen to fill.
@@ -134,6 +142,109 @@ pub struct State {
     /// this date is how a reader knows which side of the fix they fall on.
     #[serde(default)]
     pub paper_clean_since: String,
+
+    // ── 2026-10-05 policy: one account, BTC+ETH+SOL+cash targets ──────────
+
+    /// Which wallet policy `state.json` has been moved to. `0` (the serde
+    /// default, so every pre-2026-10-05 file reads as this) means the old
+    /// two-sleeve policy; `2` means the one-time move in `alloc.rs`'s module
+    /// docs has run. There is no `1` — the version jumps straight to the one
+    /// this file format actually describes, so a reader never has to wonder
+    /// whether an intermediate policy applies to data on disk.
+    #[serde(default)]
+    pub policy_version: u32,
+    /// Each pair's regime as of the last successful daily read. Compare
+    /// against `regime_applied` to find a pair with unfinished work. Absent
+    /// = never read yet (distinct from a stale reading, which this never
+    /// holds — a failed read leaves the previous value in place untouched).
+    #[serde(default)]
+    pub regime_bull: std::collections::BTreeMap<String, bool>,
+    /// USD still waiting to be invested from a deposit, across BTC/ETH/SOL by
+    /// their effective target weights. Reduced only by what an order actually
+    /// FILLED (cost + fee), never by what was ordered — see `alloc::invest`.
+    #[serde(default)]
+    pub deposit_backlog_usd: f64,
+    /// Every deposit/withdrawal this bot has recorded from Kraken's Ledgers,
+    /// most recent last. This is ALSO the dedup record: a refid already in
+    /// here is never applied twice, even across a restart or a re-fetched
+    /// ledger page.
+    #[serde(default)]
+    pub flows: Vec<FlowRecord>,
+    /// The latest Kraken ledger `time` (Unix seconds, fractional) this bot has
+    /// scanned, so each scan asks Kraken for only what might be newer.
+    /// Deliberately not the dedup mechanism by itself — `flows` is — because
+    /// Kraken's `start` filter is exclusive and float time can tie, so a scan
+    /// may legitimately re-see an entry it already recorded.
+    #[serde(default)]
+    pub last_ledger_time: f64,
+    /// Deposits minus withdrawals, in USD, since this bot started watching.
+    /// The denominator a return (as opposed to a balance change) needs: a
+    /// $500 deposit must not read as a $500 gain.
+    #[serde(default)]
+    pub net_deposits_usd: f64,
+    /// One snapshot per UTC day — total value, each asset's qty and mark, and
+    /// net deposits to date — shaped for a future web UI's daily / weekly /
+    /// monthly / yearly returns net of deposits. No UI reads this yet.
+    #[serde(default)]
+    pub history: Vec<DailySnapshot>,
+    /// UTC date `YYYY-MM-DD` `history` last gained an entry, so it appends
+    /// once per day regardless of how often the tick loop wakes.
+    #[serde(default)]
+    pub last_history_day: String,
+    /// UTC hour (`%Y-%m-%dT%H`) the work tick last ran. Replaces the 1h-bar
+    /// trigger: order SETTLEMENT still runs every wake (see `main.rs`), but
+    /// deciding what to trade runs once per UTC hour and once on startup.
+    #[serde(default)]
+    pub last_work_hour: String,
+}
+
+/// One real deposit or withdrawal, as Kraken's Ledgers reported it.
+///
+/// Kept forever (not capped like `LiveLedger::fills`): deposits are rare
+/// enough that this never grows large, and it is the only record of what the
+/// operator put in or took out, which a return calculation needs for good.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FlowKind {
+    Deposit,
+    Withdrawal,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FlowRecord {
+    /// Kraken's ledger id. The dedup key: `flows` is scanned for this before
+    /// a newly-fetched ledger entry is ever applied.
+    pub refid: String,
+    /// Unix seconds (Kraken's ledger `time`, truncated).
+    pub ts: i64,
+    pub kind: FlowKind,
+    /// Kraken's asset code, normalised to USD/USDC/USDT/BTC/ETH/SOL where
+    /// recognised, or left as Kraken sent it otherwise.
+    pub asset: String,
+    /// Signed amount in `asset`'s own units (Kraken's sign: a withdrawal is
+    /// negative). Kept signed so a reader can tell the two kinds apart even
+    /// without the `kind` field.
+    pub amount: f64,
+    /// USD value at the time: 1:1 for USD/USDC/USDT, `amount * mark` for a
+    /// crypto deposit, `0.0` for an asset this bot has no mark for (logged
+    /// as a warning where it happens, never guessed).
+    pub usd_value: f64,
+}
+
+/// One UTC day's account snapshot for a future performance UI.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DailySnapshot {
+    /// `YYYY-MM-DD`.
+    pub date: String,
+    pub total_usd: f64,
+    /// Asset code ("BTC"/"ETH"/"SOL"/"USD"/"USDC"/"USDT") → quantity held.
+    pub qty: std::collections::BTreeMap<String, f64>,
+    /// Asset code → USD mark used to value it that day (1.0 for the
+    /// stablecoins and USD itself, included anyway so a reader never has to
+    /// assume it).
+    pub mark: std::collections::BTreeMap<String, f64>,
+    /// `State::net_deposits_usd` at the moment this snapshot was taken.
+    pub net_deposits_usd_to_date: f64,
 }
 
 /// One live order we placed and are still responsible for.
@@ -183,6 +294,15 @@ impl State {
             pending_orders: Vec::new(),
             live: LiveLedger::default(),
             paper_clean_since: String::new(),
+            policy_version: 0,
+            regime_bull: Default::default(),
+            deposit_backlog_usd: 0.0,
+            flows: Vec::new(),
+            last_ledger_time: 0.0,
+            net_deposits_usd: 0.0,
+            history: Vec::new(),
+            last_history_day: String::new(),
+            last_work_hour: String::new(),
         }
     }
 }
@@ -1380,5 +1500,43 @@ mod order_tests {
         let s: State = serde_json::from_str(old).expect("old state must still parse");
         assert!(s.pending_orders.is_empty());
         assert_eq!(s.last_btc_rebalance, "2026-09-20");
+    }
+
+    #[test]
+    fn a_pre_policy_state_file_loads_with_books_and_live_intact() {
+        // `tests/fixtures/state_v1.json` was serialized from the struct shape
+        // as it stood immediately BEFORE the 2026-10-05 one-account policy —
+        // built in code from invented values, never from the live checkout's
+        // data. Every field this change adds must default, and every field
+        // that already existed must round-trip exactly.
+        let raw = include_str!("../tests/fixtures/state_v1.json");
+        let s: State = serde_json::from_str(raw).expect("a pre-policy state.json must still parse");
+
+        // New fields default as though the move has never run.
+        assert_eq!(s.policy_version, 0, "an old file predates every policy version");
+        assert!(s.regime_bull.is_empty());
+        assert_eq!(s.deposit_backlog_usd, 0.0);
+        assert!(s.flows.is_empty());
+        assert_eq!(s.last_ledger_time, 0.0);
+        assert_eq!(s.net_deposits_usd, 0.0);
+        assert!(s.history.is_empty());
+        assert_eq!(s.last_history_day, "");
+        assert_eq!(s.last_work_hour, "");
+
+        // Old data is untouched — `load_state`'s `migrate` is a no-op here
+        // because the fixture already has `live.since` set.
+        assert_eq!(s.books.len(), 3, "the historical books must still be there");
+        assert_eq!(s.books[0].id, "sol_1h_tl");
+        assert!(s.books[0].position.is_some(), "an open paper position must survive");
+        assert_eq!(s.books[0].trades.len(), 1, "recorded trade history must not be rewritten");
+        assert_eq!(s.live.since, "2026-09-23");
+        assert_eq!(s.live.fills.len(), 1, "the one real fill on file must survive");
+        assert_eq!(s.pending_orders.len(), 1);
+        assert_eq!(s.regime_applied.get("ETHUSD"), Some(&true));
+
+        // `policy_version < 2` is exactly the condition `main.rs` checks to
+        // start the one-time move (see `main::maybe_migrate_policy` and its
+        // own test against this same fixture).
+        assert!(s.policy_version < 2, "the one-time move has not run on this file yet");
     }
 }

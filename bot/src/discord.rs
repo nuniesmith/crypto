@@ -45,7 +45,8 @@ pub fn due_kinds(state: &State, force: Option<&str>) -> Vec<String> {
     if state.last_daily != today && now.hour() >= 15 {
         due.push("daily".into());
     }
-    if state.last_weekly != iso_week && now.weekday().number_from_monday() == 1 && now.hour() >= 15 {
+    if state.last_weekly != iso_week && now.weekday().number_from_monday() == 1 && now.hour() >= 15
+    {
         due.push("weekly".into());
     }
     if state.last_monthly != month && now.day() == 1 && now.hour() >= 15 {
@@ -340,7 +341,10 @@ mod tests {
         let paper_eq = body.find("equity `$").unwrap();
         assert!(kraken_at < books_at);
         assert!(books_at < paper_eq);
-        assert!(body.contains("SIMULATION"), "the books must be labelled as such");
+        assert!(
+            body.contains("SIMULATION"),
+            "the books must be labelled as such"
+        );
     }
 
     #[test]
@@ -352,15 +356,24 @@ mod tests {
         let mut state = live_state();
         state.live.since = "2026-09-23".into();
         let f = |txid: &str, side: i8, cost: f64, fee: f64| Fill {
-            txid: txid.into(), ts: 0, pair: "ETHUSD".into(), side,
-            sleeve: Sleeve::Trade, book: Some("eth_1h_sf".into()),
-            qty: 0.001, cost, fee,
+            txid: txid.into(),
+            ts: 0,
+            pair: "ETHUSD".into(),
+            side,
+            sleeve: Sleeve::Trade,
+            book: Some("eth_1h_sf".into()),
+            qty: 0.001,
+            cost,
+            fee,
         };
         state.live.record(f("B1", 1, 2.69609, 0.00701));
         state.live.record(f("S1", -1, 2.74829, 0.00714));
         let body = format_report("daily", &state, &[("SOLUSD".into(), 110.0)], None);
 
-        assert!(body.contains("real Kraken fills since 2026-09-23"), "{body}");
+        assert!(
+            body.contains("real Kraken fills since 2026-09-23"),
+            "{body}"
+        );
         // Net of the fees Kraken really charged, the round trip made about
         // four cents. The mixed book printed -$0.11 on the identical fills.
         assert!(body.contains("**net `+0.0380`**"), "{body}");
@@ -377,9 +390,15 @@ mod tests {
         let mut state = live_state();
         state.live.since = "2026-09-23".into();
         state.live.record(Fill {
-            txid: "B1".into(), ts: 0, pair: "ETHUSD".into(), side: 1,
-            sleeve: Sleeve::Trade, book: Some("eth_1h_sf".into()),
-            qty: 0.01, cost: 27.48, fee: 0.07,
+            txid: "B1".into(),
+            ts: 0,
+            pair: "ETHUSD".into(),
+            side: 1,
+            sleeve: Sleeve::Trade,
+            book: Some("eth_1h_sf".into()),
+            qty: 0.01,
+            cost: 27.48,
+            fee: 0.07,
         });
         let body = format_report("daily", &state, &[], None);
         assert!(body.contains("unpriced"), "{body}");

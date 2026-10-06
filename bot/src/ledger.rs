@@ -487,8 +487,14 @@ mod tests {
         // 0.001 ETH bought at 2696.09 and sold at 2748.29, with the fee
         // Kraken actually charges on $2.70 rather than on $1,000.
         let mut l = LiveLedger::starting("2026-09-23");
-        assert_eq!(l.record(buy("B1", "ETHUSD", 0.001, 2.69609, 0.00701)), Recorded::Applied);
-        assert_eq!(l.record(sell("S1", "ETHUSD", 0.001, 2.74829, 0.00714)), Recorded::Applied);
+        assert_eq!(
+            l.record(buy("B1", "ETHUSD", 0.001, 2.69609, 0.00701)),
+            Recorded::Applied
+        );
+        assert_eq!(
+            l.record(sell("S1", "ETHUSD", 0.001, 2.74829, 0.00714)),
+            Recorded::Applied
+        );
 
         let t = l.totals(Sleeve::Trade, &marks());
         let gross = 2.74829 - 2.69609;
@@ -510,7 +516,11 @@ mod tests {
         l.record(buy("B1", "ETHUSD", 1.0, 100.0, 1.0));
         l.record(sell("S1", "ETHUSD", 1.0, 100.0, 1.0));
         let t = l.totals(Sleeve::Trade, &marks());
-        assert!((t.realized_usd - -2.0).abs() < 1e-12, "realized {}", t.realized_usd);
+        assert!(
+            (t.realized_usd - -2.0).abs() < 1e-12,
+            "realized {}",
+            t.realized_usd
+        );
     }
 
     #[test]
@@ -530,7 +540,11 @@ mod tests {
         l.record(buy("B1", "ETHUSD", 0.01, 27.4829, 0.07));
         let t = l.totals(Sleeve::Trade, &marks());
         assert!((t.inventory_usd - 27.4829).abs() < 1e-9);
-        assert!((t.unrealized_usd - -0.07).abs() < 1e-9, "unrealized {}", t.unrealized_usd);
+        assert!(
+            (t.unrealized_usd - -0.07).abs() < 1e-9,
+            "unrealized {}",
+            t.unrealized_usd
+        );
         assert_eq!(t.realized_usd, 0.0, "nothing has been closed");
     }
 
@@ -576,7 +590,11 @@ mod tests {
         l.record(buy("B1", "SOLUSD", 2.0, 200.0, 0.0));
         l.record(sell("S1", "SOLUSD", 1.0, 120.0, 0.0));
         let p = l.get(Sleeve::Trade, "SOLUSD").unwrap();
-        assert!((p.realized_usd - 20.0).abs() < 1e-9, "realized {}", p.realized_usd);
+        assert!(
+            (p.realized_usd - 20.0).abs() < 1e-9,
+            "realized {}",
+            p.realized_usd
+        );
         assert!((p.qty - 1.0).abs() < 1e-9);
         assert!((p.basis_usd - 100.0).abs() < 1e-9, "basis {}", p.basis_usd);
     }
@@ -630,7 +648,10 @@ mod tests {
         // is of coins this ledger never watched arrive. Their proceeds are
         // not profit; booking them would turn a deposit into an edge.
         let mut l = LiveLedger::starting("2026-09-23");
-        assert_eq!(l.record(sell("S1", "SOLUSD", 1.0, 115.0, 0.3)), Recorded::Applied);
+        assert_eq!(
+            l.record(sell("S1", "SOLUSD", 1.0, 115.0, 0.3)),
+            Recorded::Applied
+        );
         let t = l.totals(Sleeve::Trade, &marks());
         assert_eq!(t.realized_usd, 0.0, "no basis means no P&L");
         assert!((t.untracked_proceeds_usd - 114.7).abs() < 1e-9);
@@ -645,7 +666,11 @@ mod tests {
         l.record(buy("B1", "SOLUSD", 1.0, 100.0, 0.0));
         l.record(sell("S1", "SOLUSD", 2.0, 240.0, 0.0));
         let p = l.get(Sleeve::Trade, "SOLUSD").unwrap();
-        assert!((p.realized_usd - 20.0).abs() < 1e-9, "realized {}", p.realized_usd);
+        assert!(
+            (p.realized_usd - 20.0).abs() < 1e-9,
+            "realized {}",
+            p.realized_usd
+        );
         assert!((p.untracked_sold_qty - 1.0).abs() < 1e-9);
         assert!((p.untracked_proceeds_usd - 120.0).abs() < 1e-9);
         assert!(p.is_flat());
@@ -656,12 +681,19 @@ mod tests {
         // Without this, the sale below would land in the untracked bucket and
         // the sleeve's move on coins it was actually managing would vanish.
         let mut l = LiveLedger::starting("2026-09-23");
-        assert_eq!(l.adopt(Sleeve::Trade, "ETHUSD", 0.001, 2_696.09), Recorded::Applied);
+        assert_eq!(
+            l.adopt(Sleeve::Trade, "ETHUSD", 0.001, 2_696.09),
+            Recorded::Applied
+        );
         l.record(sell("S1", "ETHUSD", 0.001, 2.74829, 0.00714));
         let p = l.get(Sleeve::Trade, "ETHUSD").unwrap();
         assert_eq!(p.untracked_sold_qty, 0.0, "adopted coins have a basis");
         let expected = 2.74829 - 0.00714 - 2.69609;
-        assert!((p.realized_usd - expected).abs() < 1e-9, "realized {}", p.realized_usd);
+        assert!(
+            (p.realized_usd - expected).abs() < 1e-9,
+            "realized {}",
+            p.realized_usd
+        );
     }
 
     #[test]
@@ -669,8 +701,14 @@ mod tests {
         // `LiveAction::Adopt` fires on every entry that finds coins already
         // in the wallet, so this runs again and again on the same pile.
         let mut l = LiveLedger::starting("2026-09-23");
-        assert_eq!(l.adopt(Sleeve::Trade, "SOLUSD", 0.2, 115.0), Recorded::Applied);
-        assert_eq!(l.adopt(Sleeve::Trade, "SOLUSD", 0.2, 130.0), Recorded::Duplicate);
+        assert_eq!(
+            l.adopt(Sleeve::Trade, "SOLUSD", 0.2, 115.0),
+            Recorded::Applied
+        );
+        assert_eq!(
+            l.adopt(Sleeve::Trade, "SOLUSD", 0.2, 130.0),
+            Recorded::Duplicate
+        );
         let p = l.get(Sleeve::Trade, "SOLUSD").unwrap();
         assert!((p.qty - 0.2).abs() < 1e-12);
         assert!((p.basis_usd - 23.0).abs() < 1e-9, "basis {}", p.basis_usd);
@@ -682,7 +720,10 @@ mod tests {
         // coins get a mark-in basis; the ones already tracked keep theirs.
         let mut l = LiveLedger::starting("2026-09-23");
         l.record(buy("B1", "SOLUSD", 1.0, 100.0, 0.0));
-        assert_eq!(l.adopt(Sleeve::Trade, "SOLUSD", 3.0, 115.0), Recorded::Applied);
+        assert_eq!(
+            l.adopt(Sleeve::Trade, "SOLUSD", 3.0, 115.0),
+            Recorded::Applied
+        );
         let p = l.get(Sleeve::Trade, "SOLUSD").unwrap();
         assert!((p.qty - 3.0).abs() < 1e-12);
         assert!((p.basis_usd - 330.0).abs() < 1e-9, "basis {}", p.basis_usd);
@@ -696,7 +737,10 @@ mod tests {
         // realize a P&L the sleeve never took.
         let mut l = LiveLedger::starting("2026-09-23");
         l.record(buy("B1", "SOLUSD", 2.0, 200.0, 0.0));
-        assert_eq!(l.adopt(Sleeve::Trade, "SOLUSD", 0.5, 115.0), Recorded::Duplicate);
+        assert_eq!(
+            l.adopt(Sleeve::Trade, "SOLUSD", 0.5, 115.0),
+            Recorded::Duplicate
+        );
         let p = l.get(Sleeve::Trade, "SOLUSD").unwrap();
         assert!((p.qty - 2.0).abs() < 1e-12);
         assert!((p.basis_usd - 200.0).abs() < 1e-9);
@@ -719,8 +763,14 @@ mod tests {
         // `ClosedOrders` returns the whole recent page on every cycle. One
         // double-count is a permanent error in a number nothing recomputes.
         let mut l = LiveLedger::starting("2026-09-23");
-        assert_eq!(l.record(buy("B1", "ETHUSD", 0.001, 2.69, 0.007)), Recorded::Applied);
-        assert_eq!(l.record(buy("B1", "ETHUSD", 0.001, 2.69, 0.007)), Recorded::Duplicate);
+        assert_eq!(
+            l.record(buy("B1", "ETHUSD", 0.001, 2.69, 0.007)),
+            Recorded::Applied
+        );
+        assert_eq!(
+            l.record(buy("B1", "ETHUSD", 0.001, 2.69, 0.007)),
+            Recorded::Duplicate
+        );
         let p = l.get(Sleeve::Trade, "ETHUSD").unwrap();
         assert_eq!(p.buys, 1);
         assert!((p.qty - 0.001).abs() < 1e-12);
@@ -815,7 +865,11 @@ mod tests {
     #[test]
     fn a_fill_is_routed_by_which_book_placed_it() {
         assert_eq!(Sleeve::of(Some("eth_1h_sf")), Sleeve::Trade);
-        assert_eq!(Sleeve::of(None), Sleeve::Hold, "the BTC rebalance owns no book");
+        assert_eq!(
+            Sleeve::of(None),
+            Sleeve::Hold,
+            "the BTC rebalance owns no book"
+        );
     }
 
     #[test]

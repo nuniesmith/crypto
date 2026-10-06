@@ -2,13 +2,11 @@
 #![allow(dead_code)]
 
 use std::collections::HashMap;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
 use async_trait::async_trait;
-use rustrade::{
-    Capability, ExchangeClient, Order, Position, Result, Side, Symbol,
-};
+use rustrade::{Capability, ExchangeClient, Order, Position, Result, Side, Symbol};
 
 use crate::paper::{append_journal, load_state, save_state};
 
@@ -48,7 +46,13 @@ impl ExchangeClient for PaperKraken {
         let px = order
             .limit_price
             .map(|p| p.value())
-            .or_else(|| self.last_px.lock().unwrap().get(order.symbol.as_str()).copied())
+            .or_else(|| {
+                self.last_px
+                    .lock()
+                    .unwrap()
+                    .get(order.symbol.as_str())
+                    .copied()
+            })
             .unwrap_or(0.0);
         if px <= 0.0 {
             return Err(rustrade::Error::Exchange("no fill price".into()));

@@ -1,14 +1,23 @@
-//! Persistent paper books: a $1,000-per-book SIMULATION of the signals.
+//! Persistent paper books: a $1,000-per-book SIMULATION, kept as HISTORY.
 //!
-//! Fills at the closed bar's close with Kraken tier-3 maker fees (the same
-//! assumption as the study). The live path reads the same decisions, but it
-//! must never write back into a book — see `ledger.rs` for where real fills
-//! go and why that separation had to be made.
+//! Through 2026-10-04 these books were stepped every cycle and the live path
+//! read their open/close decisions to place real orders. **Since the
+//! 2026-10-05 policy (`alloc.rs`), nothing steps them and nothing reads a
+//! decision out of them**: `main.rs` no longer fetches 1h bars or calls
+//! `step_book`, and the live wallet is sized entirely from `alloc::gap_step`
+//! and friends instead. `State::books` stays in the file exactly as it was
+//! left — untouched, not deleted, not migrated — because it is a real record
+//! of what those signals did, and inventing a reason to touch it would only
+//! risk the one thing this file still guarantees: that old data means
+//! exactly what it always meant. `PendingOrder`, `plan_settlement` and
+//! `disposition` are the parts of this file the live path still uses, for
+//! the post-only coin/deposit/stablecoin orders `main.rs` places now.
 //!
-//! Every book always trades `NOTIONAL`. That invariant is the only reason the
-//! numbers here mean anything: the question these books answer is "does this
-//! signal have an edge at a size worth trading?", which cannot be answered by
-//! a book whose size is whatever a small wallet could afford that hour.
+//! Every book always traded `NOTIONAL`. That invariant is the only reason the
+//! historical numbers mean anything: the question these books were built to
+//! answer is "does this signal have an edge at a size worth trading?", which
+//! cannot be answered by a book whose size is whatever a small wallet could
+//! afford that hour.
 
 use std::fs;
 use std::path::PathBuf;
@@ -16,9 +25,7 @@ use std::path::PathBuf;
 use chrono::{TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::features::{compute, Bar};
 use crate::ledger::{Execution, LiveLedger, Sleeve, Totals};
-use crate::signal::{structure_filtered, trendline_break};
 
 // Kraken TIER 1 -- the account's ACTUAL schedule, confirmed 2026-09-23.
 //
@@ -33,16 +40,12 @@ use crate::signal::{structure_filtered, trendline_break};
 // (0.0040, 0.0080) and its verdict at that tier is blunt: "Retail taker
 // (tier 1) is a dead end: 0/7 default combos were +EV in-sample."
 //
-// Raise these only against a real Kraken statement. Tiers improve with 30-day
-// volume, so a tier the account briefly reaches is not the tier it trades at.
+// Kept only for `fee()`, below, which `repair_open_position` still uses on
+// historical data — nothing new is ever priced at these any more.
 pub const MAKER_FEE: f64 = 0.0040;
 pub const TAKER_FEE: f64 = 0.0080;
 pub const SLIP: f64 = 0.0001;
 pub const NOTIONAL: f64 = 1_000.0;
-pub const HOLD_BARS: i64 = 24; // 24 × 1h
-pub const ATR_STOP: f64 = 1.5;
-pub const PIVOT_LB: usize = 8;
-pub const VOL_MULT: f64 = 1.3;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Position {
@@ -144,7 +147,6 @@ pub struct State {
     pub paper_clean_since: String,
 
     // ── 2026-10-05 policy: one account, BTC+ETH+SOL+cash targets ──────────
-
     /// Which wallet policy `state.json` has been moved to. `0` (the serde
     /// default, so every pre-2026-10-05 file reads as this) means the old
     /// two-sleeve policy; `2` means the one-time move in `alloc.rs`'s module
@@ -505,66 +507,6 @@ pub fn disposition(
     Disposition::Wait
 }
 
-/// Tolerance for "this order is done". Both sides of the comparison are
-/// decimal strings that round-tripped through f64, so only the last ulp is
-/// ever in question — anything larger is a genuine partial fill.
-const FILL_TOL: f64 = 1e-9;
-
-/// What an order actually did, once Kraken reports `vol_exec`.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Settled {
-    /// Executed in full. `live_qty` already says the right thing.
-    Filled,
-    /// Executed in part. `live_qty` has been cut to what really arrived.
-    Partial { ordered: f64, got: f64 },
-    /// Executed not at all. The book holds no live inventory.
-    Nothing,
-}
-
-/// Correct a book's LIVE inventory against what its buy order executed.
-///
-/// `LiveAction::Buy` writes `live_qty` at the moment Kraken ACCEPTS the order,
-/// because that is the only moment it has a number. A limit order priced at
-/// the last trade frequently does not fill, and the age-based reaper then
-/// cancels it — so without this the book believes the wallet holds coins it
-/// never received, and the eventual exit sizes a sell against them.
-///
-/// It touches `live_qty` and NOTHING else. It used to rewrite `qty`,
-/// `entry_fee` and `fees_paid` as well, which is half of how the two sets of
-/// books got mixed: a $1,000 simulated entry would be silently reduced to the
-/// 0.001 ETH the wallet could afford, and then the SIMULATION reported the
-/// P&L of a $2.70 trade. The simulation takes every signal at `NOTIONAL`
-/// whatever the account can do; what the account actually did is `ledger.rs`.
-pub fn settle_live_buy(book: &mut Book, ordered: f64, got: f64) -> Settled {
-    // A number that is not a number cannot be compared into a decision. Both
-    // comparisons below are FALSE against NaN, so without this the function
-    // would fall through to `Nothing` and discard live inventory that is
-    // really there because a parse went wrong.
-    if !ordered.is_finite() || !got.is_finite() {
-        return Settled::Filled;
-    }
-    // Also the upgrade path: orders already in the live state.json deserialize
-    // with `qty: 0.0` (`serde(default)`), which means "unknown", not "ordered
-    // nothing". Zero lands here as satisfied-in-full and the book is left
-    // exactly as placed, which is the only safe reading of an unknown.
-    if got + FILL_TOL >= ordered {
-        return Settled::Filled;
-    }
-    if got <= FILL_TOL {
-        if let Some(p) = book.position.as_mut() {
-            // The paper position STAYS — the signal fired and the simulation
-            // took it. Only the claim on the wallet goes, so the exit does
-            // not try to sell coins that never arrived.
-            p.live_qty = 0.0;
-        }
-        return Settled::Nothing;
-    }
-    if let Some(p) = book.position.as_mut() {
-        p.live_qty = got;
-    }
-    Settled::Partial { ordered, got }
-}
-
 pub fn data_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -612,182 +554,6 @@ pub fn append_journal(value: &serde_json::Value) -> anyhow::Result<()> {
         .open(journal_path())?;
     writeln!(f, "{}", serde_json::to_string(value)?)?;
     Ok(())
-}
-
-fn signal_at(strategy: &str, bars: &[Bar], i: usize) -> i8 {
-    let feat = compute(bars);
-    let sig = match strategy {
-        "trendline_break" => trendline_break(bars, &feat, PIVOT_LB, VOL_MULT),
-        "structure_filtered" => structure_filtered(bars, &feat, PIVOT_LB, VOL_MULT),
-        _ => return 0,
-    };
-    sig.get(i).copied().unwrap_or(0)
-}
-
-fn atr_at(bars: &[Bar], i: usize) -> f64 {
-    compute(bars).atr14.get(i).copied().unwrap_or(0.0)
-}
-
-pub fn step_book(book: &mut Book, bars: &[Bar], now_ts: i64) -> Vec<String> {
-    let mut log = Vec::new();
-    if bars.len() < 40 {
-        log.push(format!("{}: not enough bars ({})", book.id, bars.len()));
-        return log;
-    }
-    // Drop a still-forming last candle.
-    let interval = 3600;
-    let mut closed = bars.to_vec();
-    if let Some(last) = closed.last() {
-        if last.time + interval > now_ts {
-            closed.pop();
-        }
-    }
-    if closed.len() < 40 {
-        return log;
-    }
-    // The simulation's invariant, ENFORCED rather than hoped for: an open
-    // position is always NOTIONAL-sized. `qty` has been overwritten from the
-    // live path before and the damage was invisible for a day -- `sol_bh`,
-    // the buy-and-hold benchmark every signal is judged against, had its
-    // 9.098 SOL replaced each cycle by the wallet's 0.0000094 and printed a
-    // flat -$3.90 while SOL moved. Nothing in the live path writes here any
-    // more; this is what makes that true next month as well as today.
-    if let Some(note) = repair_open_position(book) {
-        log.push(note);
-    }
-    let i = closed.len() - 1;
-    let bar = &closed[i];
-    if bar.time <= book.last_closed_bar {
-        // Still inside the same bar: re-mark, do not trade. This used to use
-        // its own formula (`cash_usd + qty * close`), which counts the whole
-        // position as profit instead of only its move and ignores the entry
-        // fee — so the intra-bar marks and the end-of-bar mark described
-        // different books. One equity function, used everywhere.
-        if book.position.is_some() {
-            mark(book, bar.close, bar.time);
-        }
-        return log;
-    }
-
-    if book.strategy == "buy_hold" {
-        if book.position.is_none() {
-            enter(book, 1, bar, false, &mut log);
-        }
-        book.last_closed_bar = bar.time;
-        mark(book, bar.close, bar.time);
-        return log;
-    }
-
-    // manage open position first
-    if let Some(p) = book.position.clone() {
-        let held = (bar.time - p.entry_bar) / interval;
-        let atr = atr_at(&closed, i);
-        let mut exit_now = false;
-        let mut reason = String::new();
-        if held >= HOLD_BARS {
-            exit_now = true;
-            reason = "TIME".into();
-        }
-        if atr > 0.0 {
-            if p.side > 0 && bar.low < p.entry - ATR_STOP * atr {
-                exit_now = true;
-                reason = "STOP".into();
-            }
-            if p.side < 0 && bar.high > p.entry + ATR_STOP * atr {
-                exit_now = true;
-                reason = "STOP".into();
-            }
-        }
-        let sig = signal_at(&book.strategy, &closed, i);
-        if sig == -p.side {
-            exit_now = true;
-            reason = "FLIP".into();
-        }
-        if exit_now {
-            exit(book, bar, true, &reason, &mut log);
-            // flip: enter opposite on same bar after exit
-            if reason == "FLIP" && sig != 0 {
-                enter(book, sig, bar, true, &mut log);
-            }
-        }
-    } else {
-        let sig = signal_at(&book.strategy, &closed, i);
-        if sig != 0 {
-            enter(book, sig, bar, true, &mut log);
-        }
-    }
-
-    book.last_closed_bar = bar.time;
-    mark(book, bar.close, bar.time);
-    log
-}
-
-fn mark(book: &mut Book, px: f64, ts: i64) {
-    let eq = book.equity(px);
-    book.marks.push((ts, eq));
-    if book.marks.len() > 500 {
-        let drop = book.marks.len() - 400;
-        book.marks.drain(0..drop);
-    }
-}
-
-fn enter(book: &mut Book, side: i8, bar: &Bar, maker: bool, log: &mut Vec<String>) {
-    let px = bar.close;
-    let qty = NOTIONAL / px;
-    // On the position's OWN notional, not on the constant. Numerically these
-    // are the same while `qty` is always `NOTIONAL / px` — which is now an
-    // invariant — but writing the constant is what let the two drift apart:
-    // the live path resized `qty` and the fee stayed charged on $1,000, so a
-    // $2.70 position carried a $0.16 entry fee. The exit already charges
-    // `p.qty * px`; entry and exit must read the same notional or neither
-    // number means anything.
-    let f = fee(qty * px, maker);
-    book.position = Some(Position {
-        side,
-        qty,
-        entry: px,
-        entry_ts: bar.time,
-        entry_bar: bar.time,
-        entry_fee: f,
-        live_qty: 0.0,
-    });
-    book.fees_paid += f;
-    let dir = if side > 0 { "BUY" } else { "SELL SHORT" };
-    log.push(format!(
-        "{} ENTER {dir} {} qty={:.6} px={:.4} fee={:.2}",
-        book.id, book.pair, qty, px, f
-    ));
-}
-
-fn exit(book: &mut Book, bar: &Bar, maker: bool, reason: &str, log: &mut Vec<String>) {
-    let Some(p) = book.position.take() else {
-        return;
-    };
-    let px = bar.close;
-    let f = fee(p.qty * px, maker);
-    let gross = p.side as f64 * p.qty * (px - p.entry);
-    let pnl = gross - p.entry_fee - f;
-    book.realized_pnl += pnl;
-    book.fees_paid += f;
-    book.cash_usd = NOTIONAL + book.realized_pnl;
-    book.trades.push(Trade {
-        ts: bar.time,
-        side: p.side,
-        entry: p.entry,
-        exit: px,
-        qty: p.qty,
-        pnl,
-        fees: p.entry_fee + f,
-        reason: reason.into(),
-    });
-    log.push(format!(
-        "{} EXIT {} {} px={:.4} pnl={:+.2} reason={reason}",
-        book.id,
-        if p.side > 0 { "SELL" } else { "COVER" },
-        book.pair,
-        px,
-        pnl
-    ));
 }
 
 pub fn fmt_ts(ts: i64) -> String {
@@ -885,8 +651,6 @@ pub fn print_status(state: &State, marks: &[(String, f64)]) {
     }
 }
 
-
-
 #[cfg(test)]
 mod fee_tests {
     use super::*;
@@ -935,11 +699,22 @@ mod order_tests {
     const GIVE_UP: i64 = 86_400;
 
     fn exec(vol: f64) -> Execution {
-        Execution { vol_exec: vol, cost: vol * 2_700.0, fee: vol * 2_700.0 * 0.0026, at: None }
+        Execution {
+            vol_exec: vol,
+            cost: vol * 2_700.0,
+            fee: vol * 2_700.0 * 0.0026,
+            at: None,
+        }
     }
 
     fn fate(placed_at: i64, executed: Option<f64>, now: i64) -> Disposition {
-        disposition(&order("A", placed_at), executed.map(exec), now, TTL, GIVE_UP)
+        disposition(
+            &order("A", placed_at),
+            executed.map(exec),
+            now,
+            TTL,
+            GIVE_UP,
+        )
     }
 
     #[test]
@@ -970,8 +745,14 @@ mod order_tests {
         // Fill state outranks age in both directions: a young order that
         // already filled must settle now, and an ancient one must settle
         // rather than be abandoned unrecorded.
-        assert_eq!(fate(1_000, Some(0.01), 1_100), Disposition::Settle(exec(0.01)));
-        assert_eq!(fate(0, Some(0.01), 200_000), Disposition::Settle(exec(0.01)));
+        assert_eq!(
+            fate(1_000, Some(0.01), 1_100),
+            Disposition::Settle(exec(0.01))
+        );
+        assert_eq!(
+            fate(0, Some(0.01), 200_000),
+            Disposition::Settle(exec(0.01))
+        );
     }
 
     #[test]
@@ -979,7 +760,10 @@ mod order_tests {
         // The bug this whole path exists for: `Some(0.0)` is a FACT about the
         // order (it closed empty) and must not be confused with `None`
         // (still open). Collapsing them leaves the book long a phantom.
-        assert_eq!(fate(1_000, Some(0.0), 1_100), Disposition::Settle(exec(0.0)));
+        assert_eq!(
+            fate(1_000, Some(0.0), 1_100),
+            Disposition::Settle(exec(0.0))
+        );
     }
 
     #[test]
@@ -989,13 +773,21 @@ mod order_tests {
         // what closes it -- so the tick that cancels cannot also settle.
         assert_eq!(fate(1_000, None, 1_700), Disposition::Cancel);
         // next tick, now closed:
-        assert_eq!(fate(1_000, Some(0.004), 1_760), Disposition::Settle(exec(0.004)));
+        assert_eq!(
+            fate(1_000, Some(0.004), 1_760),
+            Disposition::Settle(exec(0.004))
+        );
     }
 
-    fn plan(orders: Vec<PendingOrder>, executed: &[(&str, f64)], now: i64)
-        -> (Vec<OrderAction>, Vec<PendingOrder>)
-    {
-        let map = executed.iter().map(|(t, v)| (t.to_string(), exec(*v))).collect();
+    fn plan(
+        orders: Vec<PendingOrder>,
+        executed: &[(&str, f64)],
+        now: i64,
+    ) -> (Vec<OrderAction>, Vec<PendingOrder>) {
+        let map = executed
+            .iter()
+            .map(|(t, v)| (t.to_string(), exec(*v)))
+            .collect();
         plan_settlement(orders, &map, now, TTL, GIVE_UP)
     }
 
@@ -1014,7 +806,10 @@ mod order_tests {
     #[test]
     fn a_settled_order_stops_being_tracked() {
         let (actions, tracked) = plan(vec![order("A", 1_000)], &[("A", 0.01)], 1_700);
-        assert_eq!(actions, vec![OrderAction::Settle(order("A", 1_000), exec(0.01))]);
+        assert_eq!(
+            actions,
+            vec![OrderAction::Settle(order("A", 1_000), exec(0.01))]
+        );
         assert!(tracked.is_empty(), "settled means done");
     }
 
@@ -1029,13 +824,20 @@ mod order_tests {
     fn an_abandoned_order_stops_being_tracked() {
         let (actions, tracked) = plan(vec![order("A", 0)], &[], GIVE_UP);
         assert_eq!(actions, vec![OrderAction::GiveUp(order("A", 0))]);
-        assert!(tracked.is_empty(), "the point of giving up is to stop leaking");
+        assert!(
+            tracked.is_empty(),
+            "the point of giving up is to stop leaking"
+        );
     }
 
     #[test]
     fn a_mixed_cycle_routes_each_order_to_its_own_fate() {
         let (actions, tracked) = plan(
-            vec![order("filled", 1_000), order("stale", 1_000), order("young", 1_650)],
+            vec![
+                order("filled", 1_000),
+                order("stale", 1_000),
+                order("young", 1_650),
+            ],
             &[("filled", 0.01)],
             1_700,
         );
@@ -1053,7 +855,7 @@ mod order_tests {
     }
 
     #[test]
-    fn a_fill_is_matched_to_its_OWN_txid() {
+    fn a_fill_is_matched_to_its_own_txid() {
         // A closed order belonging to some other txid must not settle this one.
         let (actions, tracked) = plan(vec![order("A", 1_000)], &[("B", 0.01)], 1_100);
         assert!(actions.is_empty());
@@ -1064,235 +866,6 @@ mod order_tests {
     fn an_order_that_never_closes_is_eventually_abandoned() {
         assert_eq!(fate(0, None, GIVE_UP - 1), Disposition::Cancel);
         assert_eq!(fate(0, None, GIVE_UP), Disposition::GiveUp);
-    }
-
-    fn long_book(qty: f64, entry_fee: f64) -> Book {
-        let mut b = Book::new("eth_1h_sf", "ETHUSD", "structure_filtered");
-        b.fees_paid = entry_fee;
-        b.position = Some(Position {
-            side: 1,
-            qty,
-            entry: 2_696.09,
-            entry_ts: 0,
-            entry_bar: 0,
-            entry_fee,
-            live_qty: qty,
-        });
-        b
-    }
-
-    #[test]
-    fn a_buy_that_filled_in_full_leaves_the_book_alone() {
-        let mut b = long_book(0.0149, 2.30);
-        assert_eq!(settle_live_buy(&mut b, 0.0149, 0.0149), Settled::Filled);
-        assert_eq!(b.position.as_ref().unwrap().live_qty, 0.0149);
-        assert_eq!(b.fees_paid, 2.30);
-    }
-
-    #[test]
-    fn a_buy_that_never_filled_drops_the_wallet_claim_and_keeps_the_trade() {
-        // 2026-09-21: eth_1h_sf sat "long 0.0149 @2696.09" against a wallet
-        // holding 0.001. The order never filled and the reaper cancelled it.
-        //
-        // The SIMULATION keeps the trade: the signal fired, and the books
-        // exist to measure the signal. Withdrawing the entry here made the
-        // simulation skip exactly the trades the account was too poor to
-        // take, which is a selection bias, not a correction. Only the claim
-        // on the wallet goes, so the exit does not sell absent coins.
-        let mut b = long_book(0.0149, 2.30);
-        assert_eq!(settle_live_buy(&mut b, 0.0149, 0.0), Settled::Nothing);
-        let p = b.position.as_ref().expect("the simulated trade stands");
-        assert_eq!(p.live_qty, 0.0, "nothing arrived in the wallet");
-        assert_eq!(p.qty, 0.0149, "the simulated size is untouched");
-        assert_eq!(b.fees_paid, 2.30, "the modelled fee belongs to the model");
-    }
-
-    #[test]
-    fn a_partial_fill_corrects_the_wallet_claim_only() {
-        let mut b = long_book(0.0149, 2.40);
-        // A QUARTER fill, deliberately not a half: at exactly half, scaling
-        // by the filled share and by the unfilled share give the same number,
-        // so a half-fill fixture cannot tell a right answer from a wrong one.
-        let got = 0.003725;
-        assert_eq!(
-            settle_live_buy(&mut b, 0.0149, got),
-            Settled::Partial { ordered: 0.0149, got }
-        );
-        let p = b.position.as_ref().unwrap();
-        assert_eq!(p.live_qty, got, "the wallet holds this much and no more");
-        assert_eq!(p.qty, 0.0149, "the simulation is not resized by a fill");
-        assert_eq!(p.entry_fee, 2.40, "nor is its fee");
-        assert_eq!(b.fees_paid, 2.40);
-    }
-
-    #[test]
-    fn the_2026_09_22_eth_entry_leaves_the_simulation_at_full_size() {
-        // Real numbers, read back from Kraken ClosedOrders:
-        //   O4MMNL-PYL4C-OMSGFN  canceled  buy ETHUSD
-        //   vol 0.01488212  vol_exec 0.00100000
-        // The old code wrote that 0.001 into the SIMULATION, so a $1,000 book
-        // reported the P&L of a $2.70 trade while still carrying a fee
-        // computed on $1,000 -- the mixing this whole change exists to end.
-        let mut b = long_book(0.37090725, 2.30);
-        let got = 0.00100000;
-        assert_eq!(
-            settle_live_buy(&mut b, 0.01488212, got),
-            Settled::Partial { ordered: 0.01488212, got }
-        );
-        let p = b.position.as_ref().unwrap();
-        assert_eq!(p.live_qty, got, "the wallet got 0.001 ETH");
-        assert_eq!(p.qty, 0.37090725, "the simulation still holds $1,000 of ETH");
-        assert_eq!(p.entry_fee, 2.30, "which is what the entry fee was charged on");
-    }
-
-    #[test]
-    fn a_fill_short_by_exactly_the_tolerance_counts_as_full() {
-        // The boundary itself. `FILL_TOL` exists because both numbers are
-        // decimal strings that round-tripped through f64, so a shortfall of
-        // exactly one tolerance is the rounding it was written for -- not a
-        // partial fill to chase. Doubling is exact in binary, so this lands
-        // on the comparison rather than near it.
-        let mut b = long_book(0.0149, 2.30);
-        assert_eq!(
-            settle_live_buy(&mut b, 2.0 * FILL_TOL, FILL_TOL),
-            Settled::Filled
-        );
-        assert_eq!(b.position.as_ref().unwrap().live_qty, 0.0149, "claim untouched");
-    }
-
-    #[test]
-    fn a_partial_fill_is_not_rounded_away_to_a_full_one() {
-        // A fill one satoshi short is still partial. If this ever reports
-        // Filled, the book claims wallet inventory that is not there and the
-        // exit sizes a sell against it.
-        let mut b = long_book(0.0149, 2.30);
-        assert!(matches!(
-            settle_live_buy(&mut b, 0.0149, 0.0149 - 1e-6),
-            Settled::Partial { .. }
-        ));
-    }
-
-    #[test]
-    fn an_order_recorded_before_qty_was_tracked_changes_nothing() {
-        // `qty` is `#[serde(default)]`, so orders already in the live
-        // state.json deserialize with 0.0. That means "unknown", not "ordered
-        // nothing" -- reading it as the latter would drop a real wallet claim
-        // on the first tick after deploy and strand the coins.
-        let mut b = long_book(0.0149, 2.30);
-        assert_eq!(settle_live_buy(&mut b, 0.0, 0.0), Settled::Filled);
-        let p = b.position.as_ref().expect("must not wipe a live book on upgrade");
-        assert_eq!(p.live_qty, 0.0149);
-    }
-
-    #[test]
-    fn a_nonsense_fill_volume_leaves_the_book_alone() {
-        // NaN compares false against everything, so an unguarded version falls
-        // all the way through to `Nothing` and drops a REAL wallet claim
-        // because a string failed to parse. Both sides have to be checked.
-        for (ordered, got) in [(0.0149, f64::NAN), (f64::NAN, 0.0), (0.0149, f64::INFINITY)] {
-            let mut b = long_book(0.0149, 2.30);
-            assert_eq!(settle_live_buy(&mut b, ordered, got), Settled::Filled);
-            assert_eq!(
-                b.position.as_ref().unwrap().live_qty,
-                0.0149,
-                "ordered={ordered} got={got}"
-            );
-        }
-    }
-
-    #[test]
-    fn settling_a_book_that_is_already_flat_does_not_panic() {
-        // The position can be gone by the time the order settles -- the
-        // strategy may have closed it on a later bar.
-        let mut b = Book::new("eth_1h_sf", "ETHUSD", "structure_filtered");
-        assert_eq!(settle_live_buy(&mut b, 0.0149, 0.0), Settled::Nothing);
-        assert!(b.position.is_none());
-    }
-
-    fn bar(time: i64, close: f64) -> Bar {
-        Bar { time, open: close, high: close, low: close, close, volume: 1.0 }
-    }
-
-    #[test]
-    fn the_entry_fee_is_charged_on_the_position_that_was_opened() {
-        // The bug, at its source. The entry fee used to be `fee(NOTIONAL)` --
-        // a constant -- while the exit charged `p.qty * px`. As long as
-        // nothing resized `qty` the two agreed; the moment the live path did,
-        // a $2.70 position carried a $0.16 entry fee and the book reported a
-        // loss on a trade the signal got right.
-        let mut b = Book::new("eth_1h_sf", "ETHUSD", "structure_filtered");
-        let mut log = Vec::new();
-        enter(&mut b, 1, &bar(0, 2_696.09), true, &mut log);
-        let p = b.position.as_ref().unwrap();
-        assert!((p.qty * p.entry - NOTIONAL).abs() < 1e-9, "entries are NOTIONAL-sized");
-        assert!(
-            (p.entry_fee - fee(p.qty * p.entry, true)).abs() < 1e-12,
-            "fee {} is not the fee on this position",
-            p.entry_fee
-        );
-    }
-
-    #[test]
-    fn a_full_round_trip_reports_the_simulation_not_the_wallet() {
-        // The 2026-09-22 ETH trade as the simulation sees it: in at 2696.09,
-        // out at 2748.29, $1,000 of notional. The live path filled 0.001 of
-        // it and the book printed -$0.11. At the size the book actually
-        // simulates, the same signal made about +$11.08.
-        //
-        // It was +$14.71 until the fee constants were corrected to the
-        // account's real Kraken tier 1. That is the whole point: $3.63 of
-        // this trade's apparent profit was a fee the account does not get.
-        let mut b = Book::new("eth_1h_sf", "ETHUSD", "structure_filtered");
-        let mut log = Vec::new();
-        enter(&mut b, 1, &bar(0, 2_696.09), true, &mut log);
-        // What the live path is now allowed to touch, and all it may touch.
-        b.position.as_mut().unwrap().live_qty = 0.001;
-        exit(&mut b, &bar(3_600, 2_748.29), true, "TIME", &mut log);
-
-        let t = b.trades.last().unwrap();
-        assert!((t.qty * t.entry - NOTIONAL).abs() < 1e-9, "closed at paper size");
-        assert!((t.pnl - 11.08).abs() < 0.02, "pnl {}", t.pnl);
-        assert!(t.pnl > 0.0, "the signal was right and the book must say so");
-        assert!((t.fees - 8.28).abs() < 0.02, "fees {}", t.fees);
-    }
-
-    #[test]
-    fn a_second_tick_inside_one_bar_marks_the_same_book_as_the_first() {
-        // The loop wakes every 60s and only TRADES on a new closed bar, so
-        // most marks come from this path. It used to use its own formula --
-        // cash plus the whole position rather than the position's move net of
-        // the entry fee -- so the equity series jumped by a thousand dollars
-        // between two ticks of the same bar and then jumped back.
-        let mut b = Book::new("sol_bh", "SOLUSD", "buy_hold");
-        let bars = flat_bars(60, 109.91);
-        let now = 60 * 3_600 + 4_000;
-        step_book(&mut b, &bars, now);
-        let first = *b.marks.last().expect("the closing mark");
-        step_book(&mut b, &bars, now);
-        let second = *b.marks.last().expect("the intra-bar mark");
-        assert_eq!(second.0, first.0, "same bar");
-        assert!(
-            (second.1 - first.1).abs() < 1e-9,
-            "equity jumped from {} to {} inside one bar",
-            first.1,
-            second.1
-        );
-        assert!((second.1 - b.equity(109.91)).abs() < 1e-9);
-    }
-
-    #[test]
-    fn an_intra_bar_mark_uses_the_same_equity_as_the_closing_one() {
-        // The same-bar branch of `step_book` had its own formula -- cash plus
-        // the whole position, rather than the position's MOVE net of the
-        // entry fee -- so the marks series jumped by a thousand dollars
-        // between two ticks of the same bar.
-        let mut b = Book::new("eth_1h_sf", "ETHUSD", "structure_filtered");
-        let mut log = Vec::new();
-        enter(&mut b, 1, &bar(0, 2_696.09), true, &mut log);
-        mark(&mut b, 2_748.29, 3_600);
-        let (_, eq) = *b.marks.last().unwrap();
-        assert!((eq - b.equity(2_748.29)).abs() < 1e-12);
-        assert!((eq - NOTIONAL).abs() < 50.0, "equity {eq} is not on the book's scale");
     }
 
     fn mixed_state() -> State {
@@ -1316,35 +889,6 @@ mod order_tests {
             }
         }
         s
-    }
-
-    fn flat_bars(n: usize, px: f64) -> Vec<Bar> {
-        (0..n).map(|k| bar(k as i64 * 3_600, px)).collect()
-    }
-
-    #[test]
-    fn stepping_a_book_puts_an_off_scale_position_back_on_scale() {
-        // Defence in depth for the invariant above. The live path no longer
-        // writes `qty`, but it did for two days and nothing noticed, so the
-        // stepper checks rather than trusts.
-        let mut b = Book::new("sol_bh", "SOLUSD", "buy_hold");
-        b.position = Some(Position {
-            side: 1, qty: 0.0000093939, entry: 109.91, entry_ts: 0, entry_bar: 0,
-            entry_fee: 3.90, live_qty: 0.0,
-        });
-        let bars = flat_bars(60, 109.91);
-        let log = step_book(&mut b, &bars, 60 * 3_600 + 4_000);
-        assert!(log.iter().any(|l| l.contains("REPAIR")), "{log:?}");
-        assert!((b.position.as_ref().unwrap().qty - NOTIONAL / 109.91).abs() < 1e-9);
-    }
-
-    #[test]
-    fn stepping_a_healthy_book_repairs_nothing() {
-        let mut b = Book::new("sol_bh", "SOLUSD", "buy_hold");
-        let bars = flat_bars(60, 109.91);
-        step_book(&mut b, &bars, 60 * 3_600 + 4_000);
-        let log = step_book(&mut b, &bars, 60 * 3_600 + 4_000);
-        assert!(!log.iter().any(|l| l.contains("REPAIR")), "{log:?}");
     }
 
     #[test]
@@ -1403,6 +947,21 @@ mod order_tests {
         assert!(bh.equity(130.0) > bh.equity(110.0) + 100.0);
     }
 
+    fn long_book(qty: f64, entry_fee: f64) -> Book {
+        let mut b = Book::new("eth_1h_sf", "ETHUSD", "structure_filtered");
+        b.fees_paid = entry_fee;
+        b.position = Some(Position {
+            side: 1,
+            qty,
+            entry: 2_696.09,
+            entry_ts: 0,
+            entry_bar: 0,
+            entry_fee,
+            live_qty: qty,
+        });
+        b
+    }
+
     #[test]
     fn a_repair_restores_an_entry_fee_that_was_scaled_to_a_fill() {
         // `settle_buy` used to scale `entry_fee` by the filled share, so a
@@ -1413,7 +972,11 @@ mod order_tests {
         let p = b.position.as_ref().unwrap();
         assert!((p.qty - NOTIONAL / 2_696.09).abs() < 1e-9);
         assert!((p.entry_fee - fee(NOTIONAL, true)).abs() < 1e-12);
-        assert!((b.fees_paid - fee(NOTIONAL, true)).abs() < 1e-12, "fees {}", b.fees_paid);
+        assert!(
+            (b.fees_paid - fee(NOTIONAL, true)).abs() < 1e-12,
+            "fees {}",
+            b.fees_paid
+        );
         assert!(note.contains("REPAIR"));
     }
 
@@ -1432,8 +995,13 @@ mod order_tests {
         let mut b = Book::new("sol_bh", "SOLUSD", "buy_hold");
         b.fees_paid = 8.10;
         b.position = Some(Position {
-            side: 1, qty: 0.0, entry: 109.91, entry_ts: 0, entry_bar: 0,
-            entry_fee: 8.10, live_qty: 0.0,
+            side: 1,
+            qty: 0.0,
+            entry: 109.91,
+            entry_ts: 0,
+            entry_bar: 0,
+            entry_fee: 8.10,
+            live_qty: 0.0,
         });
         repair_open_position(&mut b).expect("qty is still wrong");
         assert_eq!(b.position.as_ref().unwrap().entry_fee, 8.10);
@@ -1468,15 +1036,24 @@ mod order_tests {
         let mut s = mixed_state();
         migrate(&mut s, "2026-09-23");
         let f = |txid: &str, side: i8, cost: f64, fee: f64| Fill {
-            txid: txid.into(), ts: 0, pair: "ETHUSD".into(), side,
-            sleeve: Sleeve::Trade, book: Some("eth_1h_sf".into()),
-            qty: 0.001, cost, fee,
+            txid: txid.into(),
+            ts: 0,
+            pair: "ETHUSD".into(),
+            side,
+            sleeve: Sleeve::Trade,
+            book: Some("eth_1h_sf".into()),
+            qty: 0.001,
+            cost,
+            fee,
         };
         s.live.record(f("B1", 1, 2.69609, 0.00701));
         s.live.record(f("S1", -1, 2.74829, 0.00714));
         let lines = live_ledger_lines(&s, &[("ETHUSD".into(), 2_748.29)]);
         assert!(lines[0].contains("since 2026-09-23"));
-        let trade = lines.iter().find(|l| l.contains("trade")).expect("a trade line");
+        let trade = lines
+            .iter()
+            .find(|l| l.contains("trade"))
+            .expect("a trade line");
         assert!(trade.contains("fills 2"), "{trade}");
         // Net of REAL fees the round trip made a few cents. The book that
         // mixed the two printed -$0.11 on the same fills.
@@ -1513,7 +1090,10 @@ mod order_tests {
         let s: State = serde_json::from_str(raw).expect("a pre-policy state.json must still parse");
 
         // New fields default as though the move has never run.
-        assert_eq!(s.policy_version, 0, "an old file predates every policy version");
+        assert_eq!(
+            s.policy_version, 0,
+            "an old file predates every policy version"
+        );
         assert!(s.regime_bull.is_empty());
         assert_eq!(s.deposit_backlog_usd, 0.0);
         assert!(s.flows.is_empty());
@@ -1527,16 +1107,30 @@ mod order_tests {
         // because the fixture already has `live.since` set.
         assert_eq!(s.books.len(), 3, "the historical books must still be there");
         assert_eq!(s.books[0].id, "sol_1h_tl");
-        assert!(s.books[0].position.is_some(), "an open paper position must survive");
-        assert_eq!(s.books[0].trades.len(), 1, "recorded trade history must not be rewritten");
+        assert!(
+            s.books[0].position.is_some(),
+            "an open paper position must survive"
+        );
+        assert_eq!(
+            s.books[0].trades.len(),
+            1,
+            "recorded trade history must not be rewritten"
+        );
         assert_eq!(s.live.since, "2026-09-23");
-        assert_eq!(s.live.fills.len(), 1, "the one real fill on file must survive");
+        assert_eq!(
+            s.live.fills.len(),
+            1,
+            "the one real fill on file must survive"
+        );
         assert_eq!(s.pending_orders.len(), 1);
         assert_eq!(s.regime_applied.get("ETHUSD"), Some(&true));
 
         // `policy_version < 2` is exactly the condition `main.rs` checks to
         // start the one-time move (see `main::maybe_migrate_policy` and its
         // own test against this same fixture).
-        assert!(s.policy_version < 2, "the one-time move has not run on this file yet");
+        assert!(
+            s.policy_version < 2,
+            "the one-time move has not run on this file yet"
+        );
     }
 }

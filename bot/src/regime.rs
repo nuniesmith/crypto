@@ -91,7 +91,11 @@ pub fn evaluate(closes: &[f64]) -> Option<Reading> {
             Some(s) => s,
         };
         bull = Some(state);
-        last = Some(Reading { close, sma, bull: state });
+        last = Some(Reading {
+            close,
+            sma,
+            bull: state,
+        });
     }
     last
 }
@@ -134,11 +138,17 @@ mod tests {
     fn flips_only_beyond_the_buffer_and_holds_inside_it() {
         let mut c = flat(SMA_DAYS, 100.0); // bear on day one (100 is not > 100)
         c.push(104.0); // above the average, but inside +5%
-        assert!(!evaluate(&c).unwrap().bull, "inside the buffer keeps the bear state");
+        assert!(
+            !evaluate(&c).unwrap().bull,
+            "inside the buffer keeps the bear state"
+        );
         c.push(106.0); // beyond +5% of an average still ~100
         assert!(evaluate(&c).unwrap().bull, "beyond +5% flips to bull");
         c.push(97.0); // below the average, inside −5%
-        assert!(evaluate(&c).unwrap().bull, "inside the buffer keeps the bull state");
+        assert!(
+            evaluate(&c).unwrap().bull,
+            "inside the buffer keeps the bull state"
+        );
         c.push(94.0); // beyond −5%
         assert!(!evaluate(&c).unwrap().bull, "beyond −5% flips to bear");
     }
@@ -153,6 +163,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)] // CORE is a const; this is a regression guard, not dead logic.
     fn the_core_is_kept_in_a_bear() {
         assert_eq!(exposure(true), 1.0);
         assert_eq!(exposure(false), CORE);

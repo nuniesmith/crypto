@@ -43,9 +43,9 @@ pub fn trendline_break(bars: &[Bar], feat: &Features, pivot_lb: usize, vol_mult:
         for i in lb..n - lb {
             let mut hi = f64::NEG_INFINITY;
             let mut lo = f64::INFINITY;
-            for j in i - lb..=i + lb {
-                hi = hi.max(bars[j].high);
-                lo = lo.min(bars[j].low);
+            for b in &bars[i - lb..=i + lb] {
+                hi = hi.max(b.high);
+                lo = lo.min(b.low);
             }
             if (bars[i].high - hi).abs() < 1e-12 {
                 is_sh[i] = true;
@@ -102,7 +102,12 @@ pub fn trendline_break(bars: &[Bar], feat: &Features, pivot_lb: usize, vol_mult:
     sig
 }
 
-pub fn structure_filtered(bars: &[Bar], feat: &Features, pivot_lb: usize, vol_mult: f64) -> Vec<i8> {
+pub fn structure_filtered(
+    bars: &[Bar],
+    feat: &Features,
+    pivot_lb: usize,
+    vol_mult: f64,
+) -> Vec<i8> {
     let mut sig = trendline_break(bars, feat, pivot_lb, vol_mult);
     for i in 0..sig.len() {
         let s = sig[i];

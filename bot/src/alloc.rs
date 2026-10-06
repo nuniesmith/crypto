@@ -625,7 +625,11 @@ mod tests {
     #[test]
     fn invariant_never_sells_more_than_is_held() {
         // SOL is effectively the WHOLE account, so a bear flip wants to sell
-        // most of it — but never more than the wallet actually holds.
+        // most of it. Valuation marks and the order touch come from two
+        // SEPARATE fetches (`fetch_marks` vs `fetch_touch` in main.rs), so
+        // they can disagree — here the ask is well below the valuation mark,
+        // which is exactly the condition under which sizing off touch alone
+        // (uncapped) would ask for more than the wallet actually holds.
         let w = Wallet {
             usd: 0.0,
             btc: 0.0,
@@ -633,7 +637,7 @@ mod tests {
             sol: 100.0,
             ..Wallet::default()
         };
-        let t = touch(marks().sol - 0.01, marks().sol + 0.01);
+        let t = touch(99.0, 100.0); // well below marks().sol == 120.0
         match gap_step(&w, marks(), t, "SOLUSD", false) {
             GapStep::Order(r) => {
                 assert_eq!(r.side, -1);
@@ -659,6 +663,29 @@ mod tests {
             gap_step(&w, marks(), t, "SOLUSD", false),
             GapStep::AtTarget
         ));
+
+        // costmin binding INDEPENDENTLY of ordermin: at real Kraken minimums
+        // ordermin's dollar value always exceeds $0.50 for BTC/ETH/SOL at
+        // realistic prices, so this needs an artificially cheap price to
+        // reach — a $2 account wanting its full 15% SOL target is a gap of
+        // $0.30: above SOL's 0.06-coin ordermin (q=0.30 at $1/SOL) but below
+        // the $0.50 costmin.
+        let cheap_sol = Marks {
+            sol: 1.0,
+            ..marks()
+        };
+        let w_tiny = Wallet {
+            usd: 2.0,
+            ..Wallet::default()
+        };
+        let t_tiny = touch(1.0, 1.0);
+        assert!(
+            matches!(
+                gap_step(&w_tiny, cheap_sol, t_tiny, "SOLUSD", true),
+                GapStep::AtTarget
+            ),
+            "a $0.30 gap must be refused on costmin alone"
+        );
 
         // A cost below $0.50 on a pair with a tiny ordermin (hypothetically)
         // is still refused — costmin binds independently of ordermin.

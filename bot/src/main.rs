@@ -727,6 +727,31 @@ fn apply_ledger_page(
     }
 }
 
+/// Whether `maybe_read_regime` should actually attempt a read right now.
+///
+/// Normally once per UTC day (`last_regime_day`). But ALSO whenever any
+/// `regime::PAIRS` entry is missing from `regime_bull` — e.g. right after
+/// deploying this policy, when the OLD bot already set `last_regime_day` to
+/// today before `regime_bull` (a brand new field) had ever been written, and
+/// without this check BTC would have no reading — and so no effective
+/// target — until tomorrow. Either way, never inside the first 5 minutes of
+/// a UTC day: the daily candle has only just closed at 00:00 and needs a
+/// moment to settle before it is trusted. Pulled out as its own pure
+/// function so the gate is testable with a hand-built clock and no network.
+fn should_read_regime(state: &paper::State, now_utc: chrono::DateTime<Utc>) -> bool {
+    let today = now_utc.format("%Y-%m-%d").to_string();
+    let missing_pair = regime::PAIRS
+        .iter()
+        .any(|p| !state.regime_bull.contains_key(*p));
+    if state.last_regime_day == today && !missing_pair {
+        return false;
+    }
+    if now_utc.hour() == 0 && now_utc.minute() < 5 {
+        return false;
+    }
+    true
+}
+
 /// Read each coin's regime from its closed daily candles, once per UTC day,
 /// not before 00:05 UTC (the daily candle closes at 00:00 and a few minutes'
 /// buffer avoids trusting it the instant it rolls over). Updates
@@ -737,13 +762,10 @@ async fn maybe_read_regime(
     events: &mut Vec<String>,
 ) {
     let now_utc = Utc::now();
+    if !should_read_regime(state, now_utc) {
+        return;
+    }
     let today = now_utc.format("%Y-%m-%d").to_string();
-    if state.last_regime_day == today {
-        return;
-    }
-    if now_utc.hour() == 0 && now_utc.minute() < 5 {
-        return;
-    }
     let mut readings = Vec::new();
     for pair in regime::PAIRS {
         let closes = match fetch_closed_daily(client, pair).await {
@@ -1955,6 +1977,45 @@ mod work_tick_tests {
             )
             .await,
             "the converted USD must now be investable"
+        );
+    }
+
+    #[test]
+    fn a_missing_pair_forces_a_read_even_if_last_regime_day_is_already_today() {
+        use chrono::TimeZone;
+        let now = Utc.with_ymd_and_hms(2026, 10, 6, 12, 0, 0).unwrap();
+        let today = now.format("%Y-%m-%d").to_string();
+
+        // All three pairs already known, and today's read already ran:
+        // nothing to do.
+        let mut s = paper::State::default_paper();
+        s.last_regime_day = today;
+        for pair in regime::PAIRS {
+            s.regime_bull.insert(pair.to_string(), true);
+        }
+        assert!(
+            !should_read_regime(&s, now),
+            "nothing missing, already read today"
+        );
+
+        // BTC missing — e.g. the OLD bot already set last_regime_day today,
+        // before regime_bull (a brand new field) ever had an entry. Must
+        // still read, despite last_regime_day == today.
+        s.regime_bull.remove("XBTUSD");
+        assert!(
+            should_read_regime(&s, now),
+            "a pair with no reading yet must force a read"
+        );
+    }
+
+    #[test]
+    fn should_read_regime_still_waits_out_the_candle_buffer_even_with_a_missing_pair() {
+        use chrono::TimeZone;
+        let now = Utc.with_ymd_and_hms(2026, 10, 6, 0, 2, 0).unwrap(); // 00:02 UTC
+        let s = paper::State::default_paper(); // nothing read yet at all
+        assert!(
+            !should_read_regime(&s, now),
+            "still inside the 00:00-00:05 settle buffer"
         );
     }
 

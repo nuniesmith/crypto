@@ -88,6 +88,11 @@ pub const MIN_ETH: f64 = 0.001;
 pub const MIN_SOL: f64 = 0.06;
 /// Kraken `ordermin` for the USDC/USDT-USD pairs, in units of the stablecoin.
 pub const MIN_STABLE: f64 = 5.0;
+/// A buy spends at most this fraction of `usd_available()`. Kraken reserves
+/// the maker fee against a buy order's quote-currency notional at placement
+/// time, so an order sized to exactly the free cash is refused every single
+/// tick — this is what leaves a sliver behind for that reserve.
+pub const FEE_RESERVE: f64 = 0.99;
 
 /// Which wallet policy is in force.
 ///
@@ -350,7 +355,7 @@ pub fn gap_step(w: &Wallet, m: Marks, touch: Touch, pair: &str, bull: bool) -> G
     let min_q = Wallet::min_qty(pair);
     if delta > 0.0 {
         let price = touch.bid;
-        let spend = delta.min(w.usd_available());
+        let spend = delta.min(w.usd_available() * FEE_RESERVE);
         let q = floor_qty(spend / price);
         if q < min_q || spend < COST_MIN_USD {
             // Distinguish "already there" (the UNCAPPED gap is itself below
@@ -723,6 +728,35 @@ mod tests {
             r.price, 1.0001,
             "a sell prices at the ASK touch, never the bid"
         );
+    }
+
+    #[test]
+    fn invariant_a_buy_reserves_one_percent_of_free_cash_for_the_fee() {
+        // BTC deeply underweight against a total dominated by ETH, so the
+        // wanted buy ($135,500) is far more than the $1,000 free cash —
+        // the buy is capped by cash either way, which is exactly the
+        // condition under which the reserve must be what leaves a sliver
+        // behind rather than spending every last cent.
+        let w = Wallet {
+            usd: 1_000.0,
+            eth: 100.0, // $270,000 at marks().eth — dominates the total
+            ..Wallet::default()
+        };
+        let t = touch(marks().btc, marks().btc);
+        match gap_step(&w, marks(), t, "XBTUSD", true) {
+            GapStep::Order(r) => {
+                let spend = r.qty * r.price;
+                assert!(
+                    spend <= w.usd_available() * FEE_RESERVE + 1e-9,
+                    "spend {spend} must respect the {FEE_RESERVE} reserve"
+                );
+                assert!(
+                    spend < w.usd_available(),
+                    "a buy must never spend the ENTIRE free balance"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

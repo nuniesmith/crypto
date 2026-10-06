@@ -370,9 +370,9 @@ async fn work_tick(
     now: i64,
     events: &mut Vec<String>,
 ) {
-    maybe_run_policy_migration(state, w, m, events);
+    maybe_run_policy_migration(state, w, m, now, events);
     maybe_convert_stables(state, mode, live_gw, client, w, policy, now, events).await;
-    maybe_scan_ledgers(state, mode, live_gw, m, events).await;
+    maybe_scan_ledgers(state, mode, live_gw, m, now, events).await;
     maybe_invest_backlog(state, mode, live_gw, client, w, m, policy, now, events).await;
     maybe_read_regime(state, client, events).await;
     maybe_close_gaps(state, mode, live_gw, client, w, m, policy, now, events).await;
@@ -397,6 +397,7 @@ fn maybe_run_policy_migration(
     state: &mut paper::State,
     w: &alloc::Wallet,
     m: alloc::Marks,
+    now: i64,
     events: &mut Vec<String>,
 ) {
     if state.policy_version >= 2 {
@@ -413,6 +414,13 @@ fn maybe_run_policy_migration(
             state.live.adopt(ledger::Sleeve::Trade, pair, qty, mark);
         }
     }
+    // CRITICAL: the ledger-scan baseline moves to NOW, not to whenever the
+    // oldest historical deposit happened. Without this, the very first live
+    // scan (`maybe_scan_ledgers`, `last_ledger_time` still 0) would ask
+    // Kraken for every deposit ever made, find each one "new" against an
+    // empty `flows`, and re-invest money that has been sitting invested for
+    // months. Only a deposit that lands AFTER this move is ever acted on.
+    state.last_ledger_time = now as f64;
     state.policy_version = 2;
     let msg = format!(
         "POLICY move to v2: one account targeting BTC {:.0}%/ETH {:.0}%/SOL {:.0}%/cash of the \
@@ -625,21 +633,34 @@ async fn maybe_scan_ledgers(
     mode: Mode,
     live_gw: Option<&live::LiveKraken>,
     m: alloc::Marks,
+    now: i64,
     events: &mut Vec<String>,
 ) {
     if !matches!(mode, Mode::Live) {
+        return;
+    }
+    // CRITICAL defensive baseline: an unset `last_ledger_time` means "ask
+    // Kraken for everything since the dawn of time", which would find every
+    // historical deposit "new" (nothing in `flows` yet) and re-invest money
+    // that has been sitting invested for months. `maybe_run_policy_migration`
+    // is supposed to have already set this to the moment of the move, but
+    // this stands on its own — e.g. a state.json that predates this policy
+    // and has somehow reached a live tick before its migration ran. Checked
+    // BEFORE the gateway is even touched, so this is testable without one.
+    if state.last_ledger_time <= 0.0 {
+        state.last_ledger_time = now as f64;
+        let msg = "ledger baseline set — historical deposits are not re-scanned".to_string();
+        info!("{msg}");
+        events.push(msg);
         return;
     }
     let Some(gw) = live_gw else { return };
     // Kraken's `start` is exclusive, and ledger time is a float, so this may
     // legitimately re-offer an entry already recorded — `apply_ledger_entry`
     // is what actually de-duplicates, by refid, not this cursor.
-    let start = if state.last_ledger_time > 0.0 {
-        Some(state.last_ledger_time.floor() as u64)
-    } else {
-        None
-    };
-    let mut newest = state.last_ledger_time;
+    let baseline = state.last_ledger_time;
+    let start = Some(baseline.floor() as u64);
+    let mut newest = baseline;
     for entry_type in ["deposit", "withdrawal"] {
         let entries = match gw.ledgers(entry_type, start).await {
             Ok(e) => e,
@@ -648,40 +669,61 @@ async fn maybe_scan_ledgers(
                 continue;
             }
         };
-        for e in entries {
-            if e.time > newest {
-                newest = e.time;
-            }
-            let amount: f64 = match e.amount.parse() {
-                Ok(v) => v,
-                Err(_) => {
-                    warn!(
-                        "ledger {}: unreadable amount {:?} — skipped",
-                        e.refid, e.amount
-                    );
-                    continue;
-                }
-            };
-            if apply_ledger_entry(
-                state,
-                &e.refid,
-                e.time as i64,
-                &e.entry_type,
-                &e.asset,
-                amount,
-                m,
-            ) {
-                let usd = state.flows.last().map(|f| f.usd_value).unwrap_or(0.0);
-                let msg = format!(
-                    "LEDGER {} {} {amount:.8} refid={} (${usd:.2})",
-                    e.entry_type, e.asset, e.refid
-                );
-                info!("{msg}");
-                events.push(msg);
-            }
-        }
+        apply_ledger_page(state, entries, baseline, m, &mut newest, events);
     }
     state.last_ledger_time = newest;
+}
+
+/// Apply one already-fetched page of Kraken ledger entries: skip anything at
+/// or before `baseline` (defence in depth — Kraken's own `start` filter
+/// should already exclude these, but this is what keeps a server-side quirk
+/// or a future bug in the cursor from re-investing money that is already
+/// invested), then hand the rest to `apply_ledger_entry` for its refid dedup.
+/// Pulled out of `maybe_scan_ledgers` so it is testable against hand-built
+/// entries with no network call.
+fn apply_ledger_page(
+    state: &mut paper::State,
+    entries: Vec<exchange_apiws::kraken::KrakenLedgerEntry>,
+    baseline: f64,
+    m: alloc::Marks,
+    newest: &mut f64,
+    events: &mut Vec<String>,
+) {
+    for e in entries {
+        if e.time > *newest {
+            *newest = e.time;
+        }
+        if e.time <= baseline {
+            continue;
+        }
+        let amount: f64 = match e.amount.parse() {
+            Ok(v) => v,
+            Err(_) => {
+                warn!(
+                    "ledger {}: unreadable amount {:?} — skipped",
+                    e.refid, e.amount
+                );
+                continue;
+            }
+        };
+        if apply_ledger_entry(
+            state,
+            &e.refid,
+            e.time as i64,
+            &e.entry_type,
+            &e.asset,
+            amount,
+            m,
+        ) {
+            let usd = state.flows.last().map(|f| f.usd_value).unwrap_or(0.0);
+            let msg = format!(
+                "LEDGER {} {} {amount:.8} refid={} (${usd:.2})",
+                e.entry_type, e.asset, e.refid
+            );
+            info!("{msg}");
+            events.push(msg);
+        }
+    }
 }
 
 /// Invest (a share of) the deposit backlog into each coin, by its CURRENT
@@ -1413,8 +1455,9 @@ mod work_tick_tests {
             eth: 2_700.0,
             sol: 120.0,
         };
+        let now = 1_728_000_000;
         let mut events = Vec::new();
-        maybe_run_policy_migration(&mut s, &w, m, &mut events);
+        maybe_run_policy_migration(&mut s, &w, m, now, &mut events);
         assert_eq!(s.policy_version, 2);
         assert!(
             s.regime_applied.is_empty(),
@@ -1434,12 +1477,138 @@ mod work_tick_tests {
                 "{pair} must have an adopted basis after the move"
             );
         }
+        // CRITICAL: the ledger-scan baseline moves to NOW, so the next scan
+        // never asks Kraken for deposits from before the move.
+        assert_eq!(
+            s.last_ledger_time, now as f64,
+            "migration must set the ledger baseline to NOW"
+        );
 
         // Idempotent: a second run (e.g. the very next tick) does nothing.
         let mut again = Vec::new();
-        maybe_run_policy_migration(&mut s, &w, m, &mut again);
+        maybe_run_policy_migration(&mut s, &w, m, now + 3600, &mut again);
         assert!(again.is_empty());
         assert_eq!(s.policy_version, 2);
+        assert_eq!(
+            s.last_ledger_time, now as f64,
+            "a second run must not move the baseline again"
+        );
+    }
+
+    #[test]
+    fn migration_sets_the_ledger_baseline_so_old_deposits_are_never_rescanned() {
+        // The CRITICAL bug this fixes: on a fresh state.json, last_ledger_time
+        // starts at 0, which would make the first ledger scan ask Kraken for
+        // every deposit ever made and re-invest money already invested.
+        let mut s = paper::State::default_paper();
+        assert_eq!(s.last_ledger_time, 0.0);
+        let w = alloc::Wallet {
+            usd: 100.0,
+            ..alloc::Wallet::default()
+        };
+        let m = marks();
+        let now = 1_728_000_000;
+        maybe_run_policy_migration(&mut s, &w, m, now, &mut Vec::new());
+        assert_eq!(
+            s.last_ledger_time, now as f64,
+            "migration must set the ledger baseline to NOW, not leave it at 0"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_first_live_scan_sets_the_baseline_and_applies_nothing() {
+        // Defence in depth for the same CRITICAL bug, at the scan itself: if
+        // `last_ledger_time` is somehow still <= 0 when a live tick reaches
+        // the scan (e.g. a state.json that predates this policy and has not
+        // yet seen a migration tick), the scan must set the baseline and
+        // return WITHOUT ever asking Kraken for anything — `live_gw: None`
+        // here proves no network call happens on this path.
+        let mut s = paper::State::default_paper();
+        assert_eq!(s.last_ledger_time, 0.0);
+        let now = 1_728_000_000;
+        let mut events = Vec::new();
+        maybe_scan_ledgers(&mut s, Mode::Live, None, marks(), now, &mut events).await;
+        assert_eq!(s.last_ledger_time, now as f64);
+        assert!(s.flows.is_empty());
+        assert_eq!(s.net_deposits_usd, 0.0);
+        assert!(events.iter().any(|e| e.contains("baseline set")));
+    }
+
+    fn ledger_entry(
+        refid: &str,
+        time: f64,
+        entry_type: &str,
+        asset: &str,
+        amount: &str,
+    ) -> exchange_apiws::kraken::KrakenLedgerEntry {
+        serde_json::from_value(serde_json::json!({
+            "refid": refid,
+            "time": time,
+            "type": entry_type,
+            "subtype": "",
+            "aclass": "currency",
+            "asset": asset,
+            "amount": amount,
+            "fee": "0.00000000",
+            "balance": "0.00000000",
+        }))
+        .expect("Kraken's own ledger-entry shape")
+    }
+
+    #[test]
+    fn a_migrated_state_scanned_against_a_page_of_old_deposits_records_none_of_them() {
+        // The exact scenario the review called out: even if Kraken's own
+        // `start` filter somehow still returned deposits from before the
+        // policy move, the baseline check here is a second, client-side
+        // guarantee that they are never applied.
+        let mut s = paper::State::default_paper();
+        let baseline = 1_728_000_000.0;
+        s.last_ledger_time = baseline;
+        let old_page = vec![
+            ledger_entry(
+                "LOLD1",
+                baseline - 10_000.0,
+                "deposit",
+                "ZUSD",
+                "500.00000000",
+            ),
+            ledger_entry("LOLD2", baseline - 5_000.0, "deposit", "XXBT", "0.01000000"),
+            // Exactly AT the baseline is also excluded: `start` is exclusive.
+            ledger_entry("LOLD3", baseline, "deposit", "ZUSD", "10.00000000"),
+        ];
+        let mut newest = baseline;
+        let mut events = Vec::new();
+        apply_ledger_page(
+            &mut s,
+            old_page,
+            baseline,
+            marks(),
+            &mut newest,
+            &mut events,
+        );
+        assert!(s.flows.is_empty(), "no old deposit must be recorded");
+        assert_eq!(s.net_deposits_usd, 0.0);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn a_ledger_page_still_applies_entries_genuinely_after_the_baseline() {
+        let mut s = paper::State::default_paper();
+        let baseline = 1_728_000_000.0;
+        s.last_ledger_time = baseline;
+        let page = vec![ledger_entry(
+            "LNEW1",
+            baseline + 10.0,
+            "deposit",
+            "ZUSD",
+            "75.00000000",
+        )];
+        let mut newest = baseline;
+        let mut events = Vec::new();
+        apply_ledger_page(&mut s, page, baseline, marks(), &mut newest, &mut events);
+        assert_eq!(s.flows.len(), 1, "a genuinely new deposit must be recorded");
+        assert_eq!(s.net_deposits_usd, 75.0);
+        assert_eq!(newest, baseline + 10.0);
     }
 
     #[test]

@@ -519,12 +519,24 @@ pub fn disposition(
     Disposition::Wait
 }
 
+/// The checkout whose `data/` and `.env` this process uses: `CRYPTO_BOT_ROOT`
+/// when set, else the checkout the binary was COMPILED in. The override exists
+/// because a binary built in a worktree and copied into the live checkout
+/// otherwise keeps writing the worktree's state: on 2026-10-07 two deploys
+/// each started from a blank state that way, losing order tracking and
+/// history. The live service sets it to the live checkout.
+pub fn bot_root() -> PathBuf {
+    match std::env::var("CRYPTO_BOT_ROOT") {
+        Ok(v) if !v.trim().is_empty() => PathBuf::from(v.trim()),
+        _ => PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(".")),
+    }
+}
+
 pub fn data_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .join("data")
-        .join("paper")
+    bot_root().join("data").join("paper")
 }
 
 pub fn state_path() -> PathBuf {

@@ -13,7 +13,7 @@
 //! $1,000 paper books) is left on disk as history: nothing here steps it or
 //! places an order from it any more.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 use chrono::{Timelike, Utc};
@@ -44,10 +44,7 @@ fn load_dotenv() {
     // secrets. That is how a supposedly isolated dry-run build ended up
     // posting to the real Discord webhook: the copy's own .env was never
     // consulted, because the hardcoded path had already set every key.
-    let repo_env = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .map(|root| root.join(".env"))
-        .unwrap_or_else(|| PathBuf::from(".env"));
+    let repo_env = paper::bot_root().join(".env");
     for p in [repo_env.as_path(), Path::new(".env")] {
         let Ok(text) = std::fs::read_to_string(p) else {
             continue;

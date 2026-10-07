@@ -1237,10 +1237,15 @@ async fn place_rebalance(
     let cid = new_client_order_id();
     let tag = purpose.tag(r.pair);
     let msg = format!(
-        "KRAKEN {} POST-ONLY {side_s} {} vol={vol} px={px} [{tag}] cid={cid}",
+        "KRAKEN {} {} {side_s} {} vol={vol} px={px} [{tag}] cid={cid}",
         match mode {
             Mode::Live => "PLACE",
             _ => "WOULD PLACE",
+        },
+        if purpose == Purpose::Stable {
+            "TAKER"
+        } else {
+            "POST-ONLY"
         },
         r.pair,
     );
@@ -1251,7 +1256,15 @@ async fn place_rebalance(
     }
     let gw = live_gw?;
     match gw
-        .place_post_only(r.pair, r.side, &vol, &px, &cid, ORDER_TTL_SECS as u64)
+        .place_limit(
+            r.pair,
+            r.side,
+            &vol,
+            &px,
+            &cid,
+            ORDER_TTL_SECS as u64,
+            purpose == Purpose::Stable,
+        )
         .await
     {
         Ok(txid) => Some(paper::PendingOrder {

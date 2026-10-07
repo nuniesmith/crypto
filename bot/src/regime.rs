@@ -1,10 +1,11 @@
-//! The ETH/SOL sleeve's rule since 2026-10-04: hold each coin, and keep only
-//! half of it while the coin is in a bear regime.
+//! The trend rule run on every coin since 2026-10-05: hold each coin, and
+//! keep only half of it while the coin is in a bear regime.
 //!
-//! The 1h books it replaces lost to buy-and-hold: they caught about a fifth of
-//! the bull moves and paid tier-1 fees on every swing (docs/research.md). The
-//! operator asked instead to hold ETH and SOL and sell portions on the long
-//! bull/bear swings, holding for weeks to months.
+//! Through 2026-10-04 this ran ETH and SOL only, inside a BTC-hold-plus-
+//! trade-sleeve policy. The operator then asked for ONE account targeting
+//! BTC/ETH/SOL/cash directly (see `alloc.rs`), with the same trend rule
+//! sizing all three coins rather than two of them against a frozen BTC
+//! pile — so `PAIRS` below grew to include `XBTUSD`.
 //!
 //! `src/crypto/opt/regime.py` compared standard, untuned rules on Binance daily
 //! data (ETH from 2018, SOL from 2021) at Kraken tier-1 fees, over the whole
@@ -33,11 +34,19 @@ pub const BAND: f64 = 0.05;
 /// The share of each coin's sleeve held in a bear regime, the core that is
 /// never sold.
 pub const CORE: f64 = 0.50;
-/// The coins this rule runs, one equal share of the trade sleeve each.
-pub const PAIRS: [&str; 2] = ["ETHUSD", "SOLUSD"];
+/// The coins this rule runs: every coin the account targets.
+///
+/// **Grew from `["ETHUSD", "SOLUSD"]` to all three on 2026-10-05** — see
+/// `alloc.rs` for the account-level policy this feeds.
+pub const PAIRS: [&str; 3] = ["XBTUSD", "ETHUSD", "SOLUSD"];
 
 /// One day's reading for a coin.
-#[derive(Clone, Copy, Debug, PartialEq)]
+///
+/// `Serialize`/`Deserialize` so `State::regime_reading` (`paper.rs`) can
+/// persist the last reading for Discord's regime section — the daily read
+/// and the daily/weekly/monthly report run on different schedules, so the
+/// report cannot assume it is reading fresh off a just-completed read.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Reading {
     /// The last closed daily close.
     pub close: f64,
@@ -87,7 +96,11 @@ pub fn evaluate(closes: &[f64]) -> Option<Reading> {
             Some(s) => s,
         };
         bull = Some(state);
-        last = Some(Reading { close, sma, bull: state });
+        last = Some(Reading {
+            close,
+            sma,
+            bull: state,
+        });
     }
     last
 }
@@ -130,11 +143,17 @@ mod tests {
     fn flips_only_beyond_the_buffer_and_holds_inside_it() {
         let mut c = flat(SMA_DAYS, 100.0); // bear on day one (100 is not > 100)
         c.push(104.0); // above the average, but inside +5%
-        assert!(!evaluate(&c).unwrap().bull, "inside the buffer keeps the bear state");
+        assert!(
+            !evaluate(&c).unwrap().bull,
+            "inside the buffer keeps the bear state"
+        );
         c.push(106.0); // beyond +5% of an average still ~100
         assert!(evaluate(&c).unwrap().bull, "beyond +5% flips to bull");
         c.push(97.0); // below the average, inside −5%
-        assert!(evaluate(&c).unwrap().bull, "inside the buffer keeps the bull state");
+        assert!(
+            evaluate(&c).unwrap().bull,
+            "inside the buffer keeps the bull state"
+        );
         c.push(94.0); // beyond −5%
         assert!(!evaluate(&c).unwrap().bull, "beyond −5% flips to bear");
     }
@@ -149,6 +168,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)] // CORE is a const; this is a regression guard, not dead logic.
     fn the_core_is_kept_in_a_bear() {
         assert_eq!(exposure(true), 1.0);
         assert_eq!(exposure(false), CORE);

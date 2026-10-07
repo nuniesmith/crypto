@@ -7,7 +7,7 @@ publish = false
 
 [dependencies]
 # Published crates (nuniesmith). Path overrides stay in [patch] for local work.
-exchange-apiws = { version = "0.11", default-features = false, features = ["kraken"] }
+exchange-apiws = { git = "https://github.com/nuniesmith/exchange-apiws", rev = "50874dc274f54bbb3b35aa27a3e5ed9a3d3ec6e9", default-features = false, features = ["kraken"] }
 indicators-ta = "0.3"
 rustrade-framework = "0.5.2"
 async-trait = "0.1"

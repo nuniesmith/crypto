@@ -1,0 +1,168 @@
+{
+  "started_at": "2026-09-20T18:42:16.123456789+00:00",
+  "mode": "live",
+  "books": [
+    {
+      "id": "sol_1h_tl",
+      "pair": "SOLUSD",
+      "strategy": "trendline_break",
+      "cash_usd": 1000.0,
+      "realized_pnl": 0.0,
+      "fees_paid": 0.0,
+      "position": {
+        "side": 1,
+        "qty": 10.0,
+        "entry": 100.0,
+        "entry_ts": 1790000000,
+        "entry_bar": 1790000000,
+        "entry_fee": 4.1,
+        "live_qty": 0.001
+      },
+      "trades": [
+        {
+          "ts": 1790000000,
+          "side": 1,
+          "entry": 95.0,
+          "exit": 100.0,
+          "qty": 10.526315789473685,
+          "pnl": 12.3,
+          "fees": 8.2,
+          "reason": "TIME"
+        }
+      ],
+      "last_closed_bar": 0,
+      "marks": [
+        [
+          1790000000,
+          1012.3
+        ]
+      ]
+    },
+    {
+      "id": "eth_1h_sf",
+      "pair": "ETHUSD",
+      "strategy": "structure_filtered",
+      "cash_usd": 1000.0,
+      "realized_pnl": 0.0,
+      "fees_paid": 0.0,
+      "position": {
+        "side": 1,
+        "qty": 10.0,
+        "entry": 100.0,
+        "entry_ts": 1790000001,
+        "entry_bar": 1790000000,
+        "entry_fee": 4.1,
+        "live_qty": 0.001
+      },
+      "trades": [
+        {
+          "ts": 1790000000,
+          "side": 1,
+          "entry": 95.0,
+          "exit": 100.0,
+          "qty": 10.526315789473685,
+          "pnl": 12.3,
+          "fees": 8.2,
+          "reason": "TIME"
+        }
+      ],
+      "last_closed_bar": 0,
+      "marks": [
+        [
+          1790000000,
+          1012.3
+        ]
+      ]
+    },
+    {
+      "id": "sol_bh",
+      "pair": "SOLUSD",
+      "strategy": "buy_hold",
+      "cash_usd": 1000.0,
+      "realized_pnl": 0.0,
+      "fees_paid": 0.0,
+      "position": {
+        "side": 1,
+        "qty": 10.0,
+        "entry": 100.0,
+        "entry_ts": 1790000002,
+        "entry_bar": 1790000000,
+        "entry_fee": 4.1,
+        "live_qty": 0.001
+      },
+      "trades": [
+        {
+          "ts": 1790000000,
+          "side": 1,
+          "entry": 95.0,
+          "exit": 100.0,
+          "qty": 10.526315789473685,
+          "pnl": 12.3,
+          "fees": 8.2,
+          "reason": "TIME"
+        }
+      ],
+      "last_closed_bar": 0,
+      "marks": [
+        [
+          1790000000,
+          1012.3
+        ]
+      ]
+    }
+  ],
+  "last_daily": "2026-10-04",
+  "last_weekly": "2026-W40",
+  "last_monthly": "2026-10",
+  "last_btc_rebalance": "2026-10-04",
+  "last_regime_day": "2026-10-05",
+  "regime_applied": {
+    "ETHUSD": true,
+    "SOLUSD": false
+  },
+  "pending_orders": [
+    {
+      "txid": "OFIXTURE-PENDING",
+      "pair": "SOLUSD",
+      "side": -1,
+      "placed_at": 1790000500,
+      "book": "regime:SOLUSD",
+      "qty": 0.5
+    }
+  ],
+  "live": {
+    "since": "2026-09-23",
+    "pairs": [
+      {
+        "sleeve": "trade",
+        "pair": "ETHUSD",
+        "qty": 0.001,
+        "basis_usd": 2.697,
+        "realized_usd": 0.0,
+        "fees_usd": 0.007,
+        "bought_usd": 2.69,
+        "sold_usd": 0.0,
+        "buys": 1,
+        "sells": 0,
+        "adopted_qty": 0.0,
+        "adopted_usd": 0.0,
+        "untracked_sold_qty": 0.0,
+        "untracked_proceeds_usd": 0.0
+      }
+    ],
+    "fills": [
+      {
+        "txid": "OFIXTURE-1",
+        "ts": 1790000000,
+        "pair": "ETHUSD",
+        "side": 1,
+        "sleeve": "trade",
+        "book": "eth_1h_sf",
+        "qty": 0.001,
+        "cost": 2.69,
+        "fee": 0.007
+      }
+    ]
+  },
+  "paper_clean_since": "2026-09-23"
+}

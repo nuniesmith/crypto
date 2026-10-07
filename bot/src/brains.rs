@@ -78,10 +78,7 @@ impl Brain for StructureBrain {
     }
 
     async fn on_event(&self, event: &MarketDataEvent, position: &Position) -> Result<Decision> {
-        let MarketDataEvent::Candle {
-            symbol, candle, ..
-        } = event
-        else {
+        let MarketDataEvent::Candle { symbol, candle, .. } = event else {
             return Ok(Decision::hold());
         };
         if symbol != &self.symbol {

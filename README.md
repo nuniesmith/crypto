@@ -49,6 +49,70 @@ ETH/SOL from `USD − 30% of (BTC+USD)` is exactly **zero** once BTC+USD sits at
 underweight; making it two-sided without this change would have driven BTC to
 target and then never bought another coin.
 
+## Pending deploy: one account, BTC/ETH/SOL/cash targets
+
+**Not yet live.** This is branch `feat/trend-all-coins` — reviewed, tested,
+pushed, but not merged or deployed as of 2026-10-05. Until it deploys,
+everything above ("What is live") is what oryx actually runs. This section
+describes what replaces it.
+
+The operator retired the two-sleeve split (a frozen BTC hold plus a small
+ETH/SOL trading sleeve) for **one account with target weights of its TOTAL
+value: BTC 50%, ETH 25%, SOL 15%, cash 10%** at the bull floor. The same
+daily trend rule (`bot/src/regime.rs`: 200-day average ±5%) now sizes **all
+three coins**, not just ETH and SOL against a BTC pile that never traded —
+`regime::PAIRS` grew from `[ETHUSD, SOLUSD]` to `[XBTUSD, ETHUSD, SOLUSD]`.
+A coin's effective target is its base weight × `regime::exposure` (all of it
+in a bull, the 50% core in a bear), and cash is simply whatever that leaves —
+10% when every coin is bull, up to 55% when all three are bear.
+
+**No drift rebalancing.** [`src/crypto/opt/portfolio.py`](src/crypto/opt/portfolio.py)
+simulated this account against a 5/25-rebalanced version of the same targets
+and a buy-and-hold of the same split: the trend rule trading only on a flip
+beat both, and 5/25 rebalancing added roughly 30 trades a year trimming
+ordinary drift for no extra return.
+So a coin's holding is touched only by: its own regime flipping, the
+one-time move onto this policy, investing a deposit, or the operator's
+`crypto-bot rebalance` command — never by price drift between those events.
+
+Every order is a **post-only limit at the touch** (buy at the bid, sell at
+the ask), with a client order id and a Kraken-side expiry, and there is at
+most **one open order per pair** at a time — a rejected or unfilled order is
+simply re-priced and re-placed the next hour.
+
+Deposits are detected from Kraken's Ledgers (paged past its 50-per-call
+limit, deduplicated by ledger id): a USD/USDC/USDT deposit adds to a
+persisted `deposit_backlog_usd`, invested across the three coins by their
+current effective weights as cash allows; a BTC/ETH/SOL deposit counts for
+performance accounting only (it is already invested). Any USDC/USDT balance
+at or above Kraken's $5 ordermin is swept to USD the same way. Withdrawals
+are recorded, never traded on.
+
+The **work tick** (once per UTC hour, plus once on startup) replaces the
+1h-bar trigger entirely: `state.books` (the three $1,000 simulation books)
+is left on disk as history and is never stepped or read from again — see
+`bot/src/paper.rs`'s module docs. Order settlement still runs every 60s wake.
+
+`Policy::FROZEN` (`bot/src/alloc.rs`) is the tested kill switch: monitoring
+and reporting continue, nothing is ever placed. One constant to flip, not a
+rewrite — same idea as the old `Policy::HOLD_ONLY` it replaces.
+
+Discord reports (same daily/weekly/monthly schedule) show each asset's
+weight against its effective target, each coin's regime with its distance
+from the 200-day average and the price that would flip it, pending work
+(flips not yet applied, the deposit backlog, open orders), and deposits for
+the period. The old $1,000-book simulation section is gone from the report.
+
+`state.json` gains `policy_version`, `regime_bull`, `regime_reading`,
+`deposit_backlog_usd`, `flows`, `last_ledger_time`, `net_deposits_usd`,
+`history`, `last_history_day` and `last_work_hour` — all `#[serde(default)]`,
+so the file already on oryx keeps loading. On first load, `policy_version <
+2` triggers a one-time move: every coin is marked pending its effective
+target (today's account is roughly BTC 56% / ETH 10% / SOL 10% / USD 24%,
+so this sells some BTC and buys ETH and SOL over the following ticks), and
+the (now unified) ledger adopts whatever is already held so a later
+regime-flip sell has a real basis to compute P&L against.
+
 ## Two sets of books, deliberately
 
 The bot keeps **two** accounts that must never be read as one number.

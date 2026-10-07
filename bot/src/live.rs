@@ -2,7 +2,9 @@
 //! Only constructed when the operator passes the confirm string.
 
 use async_trait::async_trait;
-use exchange_apiws::kraken::KrakenOrder;
+use exchange_apiws::kraken::{
+    KrakenLedgerEntry, KrakenLedgerQuery, KrakenOrder, KrakenOrderOptions,
+};
 use exchange_apiws::{KrakenCredentials, KrakenPrivateClient};
 use rustrade::{Capability, ExchangeClient, Order, Position, Result, Side, Symbol};
 use std::collections::HashMap;
@@ -24,8 +26,18 @@ pub fn execution_of(o: &KrakenOrder) -> Option<Execution> {
     }
     Some(Execution {
         vol_exec,
-        cost: o.cost.parse().ok().filter(|v: &f64| v.is_finite()).unwrap_or(0.0),
-        fee: o.fee.parse().ok().filter(|v: &f64| v.is_finite()).unwrap_or(0.0),
+        cost: o
+            .cost
+            .parse()
+            .ok()
+            .filter(|v: &f64| v.is_finite())
+            .unwrap_or(0.0),
+        fee: o
+            .fee
+            .parse()
+            .ok()
+            .filter(|v: &f64| v.is_finite())
+            .unwrap_or(0.0),
         // `opentm` is when the order opened, not when it filled. These are
         // limit orders reaped after ten minutes, so the two sit in the same
         // bar; the settling cycle's clock is the fallback.
@@ -35,6 +47,19 @@ pub fn execution_of(o: &KrakenOrder) -> Option<Execution> {
 
 pub struct LiveKraken {
     client: KrakenPrivateClient,
+}
+
+/// The order options this policy EVER sends to Kraken — pulled out as its
+/// own function so the hard rule "only post-only orders" is a plain value
+/// comparison rather than something only provable by reading every call
+/// site of `place_order_with`.
+fn post_only_options(client_order_id: &str, ttl_secs: u64) -> KrakenOrderOptions {
+    KrakenOrderOptions {
+        post_only: true,
+        validate: false,
+        client_order_id: Some(client_order_id.to_string()),
+        expire_after_secs: Some(ttl_secs),
+    }
 }
 
 /// One non-dust Kraken asset, marked to USD when we have a ticker.
@@ -74,17 +99,8 @@ impl AccountSnapshot {
         }
         for a in &self.assets {
             match a.usd {
-                Some(u) => println!(
-                    "  {:16} {:>14}  ${:.2}",
-                    a.code,
-                    fmt_qty(a.amount),
-                    u
-                ),
-                None => println!(
-                    "  {:16} {:>14}  (unpriced)",
-                    a.code,
-                    fmt_qty(a.amount)
-                ),
+                Some(u) => println!("  {:16} {:>14}  ${:.2}", a.code, fmt_qty(a.amount), u),
+                None => println!("  {:16} {:>14}  (unpriced)", a.code, fmt_qty(a.amount)),
             }
         }
     }
@@ -193,9 +209,7 @@ pub fn fmt_qty(x: f64) -> String {
         format!("{x:.4}")
     } else {
         let s = format!("{x:.8}");
-        s.trim_end_matches('0')
-            .trim_end_matches('.')
-            .to_string()
+        s.trim_end_matches('0').trim_end_matches('.').to_string()
     }
 }
 
@@ -305,17 +319,35 @@ impl LiveKraken {
             .map_err(|e| anyhow::anyhow!("{e}"))
     }
 
-    pub async fn place_limit(
+    /// Place a post-only limit order with a client order id and a relative
+    /// expiry — every order this policy places (hard rule: only post-only).
+    ///
+    /// Kraken cancels a post-only order that would have crossed rather than
+    /// let it take liquidity, reporting it closed with nothing executed; the
+    /// TTL cancels anything left resting after `ttl_secs`. Either way the
+    /// caller's normal settlement path (`paper::plan_settlement`) is what
+    /// notices and the next work tick re-prices and re-places — there is no
+    /// separate "rejected" case to handle here.
+    pub async fn place_post_only(
         &self,
         pair: &str,
         side: i8,
         volume: &str,
         price: &str,
+        client_order_id: &str,
+        ttl_secs: u64,
     ) -> anyhow::Result<String> {
         let side_s = if side > 0 { "buy" } else { "sell" };
         let resp = self
             .client
-            .place_order(pair, side_s, "limit", volume, Some(price))
+            .place_order_with(
+                pair,
+                side_s,
+                "limit",
+                volume,
+                Some(price),
+                &post_only_options(client_order_id, ttl_secs),
+            )
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         Ok(resp
@@ -323,6 +355,40 @@ impl LiveKraken {
             .first()
             .cloned()
             .unwrap_or_else(|| format!("{resp:?}")))
+    }
+
+    /// Every ledger entry of `entry_type` (`"deposit"` or `"withdrawal"`)
+    /// strictly after `start` (Unix seconds; `None` = Kraken's own default,
+    /// everything). Pages at Kraken's own 50-per-call limit until a page
+    /// comes back short, so the caller never has to know that boundary
+    /// exists.
+    pub async fn ledgers(
+        &self,
+        entry_type: &str,
+        start: Option<u64>,
+    ) -> anyhow::Result<Vec<KrakenLedgerEntry>> {
+        let mut out = Vec::new();
+        let mut offset = 0u64;
+        loop {
+            let page = self
+                .client
+                .get_ledgers(&KrakenLedgerQuery {
+                    asset: None,
+                    entry_type: Some(entry_type),
+                    start,
+                    end: None,
+                    offset: Some(offset),
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let n = page.ledger.len();
+            out.extend(page.ledger.into_values());
+            if n < 50 {
+                break;
+            }
+            offset += n as u64;
+        }
+        Ok(out)
     }
 }
 
@@ -460,12 +526,21 @@ mod tests {
         // These two fields were being read off the wire and thrown away, so
         // the only fee the bot knew was a MODELLED 0.23% of $1,000 -- charged
         // against a position worth $2.70.
-        let e = execution_of(&closed("0.00100000", "2.69609", "0.00701", Some(1790064512.4)))
-            .expect("a parseable fill");
+        let e = execution_of(&closed(
+            "0.00100000",
+            "2.69609",
+            "0.00701",
+            Some(1790064512.4),
+        ))
+        .expect("a parseable fill");
         assert!((e.vol_exec - 0.001).abs() < 1e-12);
         assert!((e.cost - 2.69609).abs() < 1e-12);
         assert!((e.fee - 0.00701).abs() < 1e-12);
-        assert_eq!(e.at, Some(1_790_064_512), "Kraken's clock, truncated to seconds");
+        assert_eq!(
+            e.at,
+            Some(1_790_064_512),
+            "Kraken's clock, truncated to seconds"
+        );
     }
 
     #[test]
@@ -496,6 +571,18 @@ mod tests {
         // zero would withdraw a real entry.
         assert!(execution_of(&closed("", "2.69", "0.007", None)).is_none());
         assert!(execution_of(&closed("nan", "2.69", "0.007", None)).is_none());
+    }
+
+    #[test]
+    fn invariant_every_order_this_bot_places_is_post_only() {
+        let o = post_only_options("abc123", 600);
+        assert!(o.post_only, "hard rule: only post-only orders");
+        assert!(
+            !o.validate,
+            "a validate-only call never reaches the book at all"
+        );
+        assert_eq!(o.client_order_id.as_deref(), Some("abc123"));
+        assert_eq!(o.expire_after_secs, Some(600));
     }
 
     #[test]

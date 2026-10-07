@@ -1,11 +1,16 @@
 //! Discord webhook reports: daily / weekly / monthly progress.
+//!
+//! Since the 2026-10-05 policy (`alloc.rs`) this describes ONE account
+//! against its effective targets, not two sleeves and three $1,000
+//! simulation books — the paper books are history now (`paper.rs`'s module
+//! docs) and have no section here any more.
 
-use chrono::{Datelike, Timelike, Utc};
+use chrono::{Datelike, Days, Timelike, Utc};
 use tracing::{info, warn};
 
-use crate::ledger::Sleeve;
-use crate::live::{fmt_qty, AccountSnapshot};
-use crate::paper::State;
+use crate::live::AccountSnapshot;
+use crate::paper::{fmt_ts, FlowKind, State};
+use crate::regime;
 
 pub fn webhook_url() -> Option<String> {
     std::env::var("DISCORD_WEBHOOK_URL")
@@ -45,7 +50,8 @@ pub fn due_kinds(state: &State, force: Option<&str>) -> Vec<String> {
     if state.last_daily != today && now.hour() >= 15 {
         due.push("daily".into());
     }
-    if state.last_weekly != iso_week && now.weekday().number_from_monday() == 1 && now.hour() >= 15 {
+    if state.last_weekly != iso_week && now.weekday().number_from_monday() == 1 && now.hour() >= 15
+    {
         due.push("weekly".into());
     }
     if state.last_monthly != month && now.day() == 1 && now.hour() >= 15 {
@@ -54,12 +60,183 @@ pub fn due_kinds(state: &State, force: Option<&str>) -> Vec<String> {
     due
 }
 
-pub fn format_report(
-    kind: &str,
-    state: &State,
-    marks: &[(String, f64)],
-    account: Option<&AccountSnapshot>,
-) -> String {
+/// Sum of one display asset code's USD value across `account.assets` (an
+/// account can hold more than one row for a code, e.g. staked SOL shows as
+/// a separate `"SOL (SOL.S)"` row — matched here by prefix so it still
+/// counts toward the SOL bucket).
+fn asset_usd(account: &AccountSnapshot, code: &str) -> f64 {
+    account
+        .assets
+        .iter()
+        .filter(|a| a.code == code || a.code.starts_with(&format!("{code} (")))
+        .filter_map(|a| a.usd)
+        .sum()
+}
+
+/// "wallet value and each asset's weight against its effective target" —
+/// the first thing point 11 of the policy asks the report to show.
+fn targets_block(state: &State, account: &AccountSnapshot) -> Vec<String> {
+    let total = account.total_usd;
+    let mut lines = vec![format!("**wallet** `${total:.2}` total (marked to USD)")];
+    let mut coin_usd_sum = 0.0;
+    for (pair, code) in [("XBTUSD", "BTC"), ("ETHUSD", "ETH"), ("SOLUSD", "SOL")] {
+        let usd = asset_usd(account, code);
+        coin_usd_sum += usd;
+        let weight = if total > 0.0 {
+            usd / total * 100.0
+        } else {
+            0.0
+        };
+        match state.regime_bull.get(pair) {
+            Some(&bull) => {
+                let target = crate::alloc::effective_weight(pair, bull) * 100.0;
+                lines.push(format!(
+                    "• **{code}** `${usd:.2}` — `{weight:.1}%` of account vs `{target:.1}%` target ({})",
+                    if bull { "bull" } else { "bear" }
+                ));
+            }
+            None => lines.push(format!(
+                "• **{code}** `${usd:.2}` — `{weight:.1}%` of account (regime not yet read)"
+            )),
+        }
+    }
+    let cash_usd = (total - coin_usd_sum).max(0.0);
+    let cash_weight_pct = if total > 0.0 {
+        cash_usd / total * 100.0
+    } else {
+        0.0
+    };
+    match crate::alloc::cash_weight(&state.regime_bull) {
+        Some(target) => lines.push(format!(
+            "• **cash** `${cash_usd:.2}` — `{cash_weight_pct:.1}%` of account vs `{:.1}%` target",
+            target * 100.0
+        )),
+        None => lines.push(format!(
+            "• **cash** `${cash_usd:.2}` — `{cash_weight_pct:.1}%` of account (target incomplete — not every coin has been read)"
+        )),
+    }
+    lines.push(String::new());
+    lines
+}
+
+/// "each coin's regime with its distance from the 200-day average and the
+/// price that would flip it."
+fn regime_block(state: &State) -> Vec<String> {
+    let mut lines = vec!["**regime** _(200-day SMA ± 5%)_".to_string()];
+    for pair in regime::PAIRS {
+        match state.regime_reading.get(pair) {
+            Some(r) => {
+                let flip = if r.bull {
+                    r.sma * (1.0 - regime::BAND)
+                } else {
+                    r.sma * (1.0 + regime::BAND)
+                };
+                lines.push(format!(
+                    "• **{pair}** {} — close `{:.2}` vs 200d `{:.2}` (`{:+.1}%`), flips at `{:.2}`",
+                    if r.bull { "BULL" } else { "BEAR" },
+                    r.close,
+                    r.sma,
+                    100.0 * r.distance(),
+                    flip
+                ));
+            }
+            None => lines.push(format!(
+                "• **{pair}** not yet read (needs {} closed daily candles)",
+                regime::SMA_DAYS
+            )),
+        }
+    }
+    lines.push(String::new());
+    lines
+}
+
+/// "pending work: flips not yet applied, deposit backlog, open orders" —
+/// "deposit backlog" is now just whether `deposit_pending` is set; there is
+/// no dollar amount left to track (see `paper::State::deposit_pending`).
+fn pending_work_block(state: &State) -> Vec<String> {
+    let mut lines = vec!["**pending work**".to_string()];
+    let flips: Vec<&str> = regime::PAIRS
+        .iter()
+        .copied()
+        .filter(|p| state.regime_bull.contains_key(*p))
+        .filter(|p| state.regime_applied.get(*p).copied() != state.regime_bull.get(*p).copied())
+        .collect();
+    if flips.is_empty() {
+        lines.push("• no flips outstanding".into());
+    } else {
+        lines.push(format!(
+            "• flip(s) not yet fully applied: **{}**",
+            flips.join(", ")
+        ));
+    }
+    if state.deposit_pending {
+        lines.push("• investing a deposit into whatever it makes underweight".to_string());
+    }
+    if state.pending_orders.is_empty() {
+        lines.push("• no open orders".into());
+    } else {
+        for o in &state.pending_orders {
+            lines.push(format!(
+                "• open order: {} `{:.8}` {} placed `{}`",
+                if o.side > 0 { "buy" } else { "sell" },
+                o.qty,
+                o.pair,
+                fmt_ts(o.placed_at)
+            ));
+        }
+    }
+    lines.push(String::new());
+    lines
+}
+
+/// The UTC timestamp this report's period began at: today for daily/startup,
+/// this ISO week's Monday for weekly, the 1st of the month for monthly.
+fn period_start(kind: &str) -> chrono::NaiveDate {
+    let today = Utc::now().date_naive();
+    match kind {
+        "weekly" => {
+            let back = Utc::now().weekday().number_from_monday() as u64 - 1;
+            today - Days::new(back)
+        }
+        "monthly" => today.with_day(1).expect("every month has a 1st"),
+        _ => today,
+    }
+}
+
+/// "deposits this period."
+fn deposits_block(state: &State, kind: &str) -> Vec<String> {
+    let start = period_start(kind);
+    let start_ts = start
+        .and_hms_opt(0, 0, 0)
+        .expect("midnight always exists")
+        .and_utc()
+        .timestamp();
+    let deposits: Vec<_> = state
+        .flows
+        .iter()
+        .filter(|f| f.kind == FlowKind::Deposit && f.ts >= start_ts)
+        .collect();
+    let mut lines = vec![format!("**deposits this period** _(since {start})_")];
+    if deposits.is_empty() {
+        lines.push("• none".into());
+    } else {
+        for d in &deposits {
+            lines.push(format!(
+                "• {} `{:.8}` (`${:.2}`) refid={}",
+                d.asset, d.amount, d.usd_value, d.refid
+            ));
+        }
+        let total: f64 = deposits.iter().map(|d| d.usd_value).sum();
+        lines.push(format!(
+            "• period total `${total:.2}` · net deposits to date `${:.2}`",
+            state.net_deposits_usd
+        ));
+    }
+    lines.push(String::new());
+    lines
+}
+
+pub fn format_report(kind: &str, state: &State, account: Option<&AccountSnapshot>) -> String {
     let live = state.mode == "live";
     let mut lines = vec![
         format!(
@@ -69,192 +246,43 @@ pub fn format_report(
         format!("started `{}`", state.started_at),
         String::new(),
     ];
-    if live {
-        match account {
-            Some(acct) if acct.error.is_some() => {
-                lines.push("**Kraken account**".into());
-                lines.push(format!(
-                    "_could not fetch: {}_",
-                    acct.error.as_deref().unwrap_or("unknown")
-                ));
-                lines.push(String::new());
-            }
-            Some(acct) => {
-                lines.push(format!(
-                    "**Kraken account**  `${:.2}` marked to USD",
-                    acct.total_usd
-                ));
-                if acct.assets.is_empty() {
-                    lines.push("_(no balances above $0.01)_".into());
-                }
-                for a in &acct.assets {
-                    match a.usd {
-                        Some(u) => lines.push(format!(
-                            "• **{}** `{}`  `${:.2}`",
-                            a.code,
-                            fmt_qty(a.amount),
-                            u
-                        )),
-                        None => lines.push(format!(
-                            "• **{}** `{}`  _(unpriced)_",
-                            a.code,
-                            fmt_qty(a.amount)
-                        )),
-                    }
-                }
-                lines.push(String::new());
-                lines.push("**policy** BTC HODL 70/30 ±10% of BTC+USD. ETH/SOL trade the wallet pile only. `sol_bh` is mark-only — no $1k buys.".into());
-                lines.push(String::new());
-            }
-            None => {
-                lines.push("**Kraken account**".into());
-                lines.push("_no API keys in this process — cannot show live balance_".into());
-                lines.push(String::new());
-            }
-        }
-        // The live ledger goes ABOVE the books for the same reason the Kraken
-        // balance does: it is the only section on this report that describes
-        // real money. The books underneath are a simulation at a size this
-        // account has never traded, and reading them as live P&L is exactly
-        // the confusion this section exists to end.
-        lines.extend(live_ledger_block(state, marks));
-        lines.push(
-            "**strategy books** _(pure $1,000-per-book SIMULATION — not the live sleeve above)_"
-                .into(),
-        );
-    }
-    for b in &state.books {
-        let px = marks
-            .iter()
-            .find(|(p, _)| p == &b.pair)
-            .map(|(_, x)| *x)
-            .unwrap_or(0.0);
-        let eq = b.equity(px);
-        let pnl = eq - crate::paper::NOTIONAL;
-        let pos = match &b.position {
-            None => "flat".to_string(),
-            Some(p) => format!(
-                "{} {:.4} @{:.3}",
-                if p.side > 0 { "long" } else { "short" },
-                p.qty,
-                p.entry
-            ),
-        };
-        lines.push(format!(
-            "• **{}** ({}) {}  equity `${:.2}`  pnl `{:+.2}`  fees `${:.2}`  trades `{}`",
-            b.id,
-            b.pair,
-            pos,
-            eq,
-            pnl,
-            b.fees_paid,
-            b.trades.len()
-        ));
-    }
-    lines.push(String::new());
     if !live {
-        let total: f64 = state
-            .books
-            .iter()
-            .map(|b| {
-                let px = marks
-                    .iter()
-                    .find(|(p, _)| p == &b.pair)
-                    .map(|(_, x)| *x)
-                    .unwrap_or(0.0);
-                b.equity(px)
-            })
-            .sum();
-        lines.push(format!(
-            "combined equity `${:.2}` vs start `${:.0}`",
-            total,
-            crate::paper::NOTIONAL * state.books.len() as f64
-        ));
+        lines.push("_paper mode — no live wallet to report_".into());
+        return lines.join("\n");
     }
-    lines.push(if live {
-        "_SOL 1h trendline · ETH 1h VWAP+EMA filter. BTC is HODL. Live limits use real Kraken balances, not $1k books._".into()
-    } else {
-        "_SOL 1h trendline · ETH 1h VWAP+EMA filter · SOL buy-hold. Maker tier-3 fees. Paper only — no exchange orders._".into()
-    });
-    lines.join("\n")
-}
-
-/// What the real money did, net of real Kraken fees.
-fn live_ledger_block(state: &State, marks: &[(String, f64)]) -> Vec<String> {
-    if state.live.since.is_empty() {
-        return Vec::new();
-    }
-    let t = state.live.totals(Sleeve::Trade, marks);
-    let mut lines = vec![format!(
-        "**live sleeve** _(real Kraken fills since {})_",
-        state.live.since
-    )];
-    if t.fills == 0 {
-        lines.push("_no real fills recorded yet_".into());
-        lines.push(String::new());
-        return lines;
-    }
-    lines.push(format!(
-        "• **net `{:+.4}`** = realized `{:+.4}` + unrealized `{:+.4}`  ·  real fees `${:.4}` over `{}` fills",
-        t.net_usd(),
-        t.realized_usd,
-        t.unrealized_usd,
-        t.fees_usd,
-        t.fills
-    ));
-    for pair in ["ETHUSD", "SOLUSD"] {
-        let Some(p) = state.live.get(Sleeve::Trade, pair) else {
-            continue;
-        };
-        if p.is_flat() {
-            continue;
+    match account {
+        Some(acct) if acct.error.is_some() => {
+            lines.push("**Kraken account**".into());
+            lines.push(format!(
+                "_could not fetch: {}_",
+                acct.error.as_deref().unwrap_or("unknown")
+            ));
         }
-        lines.push(format!(
-            "• holding **{}** `{}` at a cost of `${:.4}`",
-            pair,
-            fmt_qty(p.qty),
-            p.basis_usd
-        ));
+        Some(acct) => {
+            lines.extend(targets_block(state, acct));
+            lines.extend(regime_block(state));
+            lines.extend(pending_work_block(state));
+            lines.extend(deposits_block(state, kind));
+        }
+        None => {
+            lines.push("**Kraken account**".into());
+            lines.push("_no API keys in this process — cannot show live balance_".into());
+        }
     }
-    if !t.complete() {
-        lines.push(format!(
-            "_⚠ {} pair(s) unpriced — the net above is partial, not zero_",
-            t.unpriced
-        ));
-    }
-    if t.adopted_usd > 0.0 {
-        lines.push(format!(
-            "_`${:.2}` of that cost basis was marked in at the adoption price, not paid_",
-            t.adopted_usd
-        ));
-    }
-    let hold = state.live.totals(Sleeve::Hold, marks);
-    if hold.fills > 0 {
-        lines.push(format!(
-            "_BTC rebalancing (not a bet): `{}` fills, `${:.4}` of real fees_",
-            hold.fills, hold.fees_usd
-        ));
-    }
-    lines.push(String::new());
-    lines
+    lines.push("_policy: one account, BTC/ETH/SOL/cash targets scaled by the daily regime rule. alloc.rs._".into());
+    lines.join("\n")
 }
 
 /// Send due reports. Daily ~15:00 UTC, weekly Monday, monthly on the 1st.
 pub async fn maybe_report(
     state: &mut State,
-    marks: &[(String, f64)],
     force: Option<&str>,
     account: Option<&AccountSnapshot>,
 ) {
-    send_kinds(state, marks, &due_kinds(state, force), account).await;
+    send_kinds(state, &due_kinds(state, force), account).await;
 }
 
-pub async fn send_kinds(
-    state: &mut State,
-    marks: &[(String, f64)],
-    kinds: &[String],
-    account: Option<&AccountSnapshot>,
-) {
+pub async fn send_kinds(state: &mut State, kinds: &[String], account: Option<&AccountSnapshot>) {
     if kinds.is_empty() || webhook_url().is_none() {
         return;
     }
@@ -263,7 +291,7 @@ pub async fn send_kinds(
     let iso_week = now.format("%G-W%V").to_string();
     let month = now.format("%Y-%m").to_string();
     for kind in kinds {
-        let body = format_report(kind, state, marks, account);
+        let body = format_report(kind, state, account);
         match send_raw(&body).await {
             Ok(()) => {
                 info!("discord {kind} sent");
@@ -284,96 +312,212 @@ pub async fn send_kinds(
 mod tests {
     use super::*;
     use crate::live::value_balances;
-    use crate::paper::{Book, State};
+    use crate::paper::{FlowRecord, PendingOrder};
+    use crate::regime::Reading;
 
     fn live_state() -> State {
-        State {
-            started_at: "2026-09-20T18:42:16Z".into(),
-            mode: "live".into(),
-            books: vec![Book {
-                id: "sol_bh".into(),
-                pair: "SOLUSD".into(),
-                strategy: "buy_hold".into(),
-                cash_usd: 1000.0,
-                realized_pnl: 0.0,
-                fees_paid: 3.9,
-                position: None,
-                trades: vec![],
-                last_closed_bar: 0,
-                marks: vec![],
-            }],
-            last_daily: String::new(),
-            last_weekly: String::new(),
-            last_monthly: String::new(),
-            last_btc_rebalance: String::new(),
-            last_regime_day: String::new(),
-            regime_applied: Default::default(),
-            pending_orders: Vec::new(),
-            live: crate::ledger::LiveLedger::default(),
-            paper_clean_since: String::new(),
-        }
+        let mut s = State::default_paper();
+        s.mode = "live".into();
+        s.books.clear();
+        s
+    }
+
+    fn account(bals: &[(&str, f64)], marks: &[(&str, f64)]) -> AccountSnapshot {
+        let bals: Vec<(String, f64)> = bals.iter().map(|(c, n)| (c.to_string(), *n)).collect();
+        let marks: Vec<(String, f64)> = marks.iter().map(|(c, n)| (c.to_string(), *n)).collect();
+        value_balances(&bals, &marks)
     }
 
     #[test]
-    fn live_report_leads_with_kraken_not_paper_books() {
-        let state = live_state();
-        let marks = vec![("SOLUSD".into(), 110.0)];
-        let snap = value_balances(&[("ZUSD".into(), 4321.0), ("SOL".into(), 5.0)], &marks);
-        let body = format_report("startup", &state, &marks, Some(&snap));
-        assert!(body.contains("LIVE Kraken"));
-        assert!(body.contains("**Kraken account**  `$4871.00`"));
-        assert!(body.contains("**USD** `4321.00`"));
-        assert!(body.contains("**SOL** `5.0000`"));
-        assert!(body.contains("wallet pile"));
-        assert!(body.contains("no $1k buys"));
-        let kraken_at = body.find("Kraken account").unwrap();
-        let books_at = body.find("strategy books").unwrap();
-        let paper_eq = body.find("equity `$").unwrap();
-        assert!(kraken_at < books_at);
-        assert!(books_at < paper_eq);
-        assert!(body.contains("SIMULATION"), "the books must be labelled as such");
+    fn paper_mode_skips_straight_to_a_note_with_no_books_section() {
+        let mut s = live_state();
+        s.mode = "paper".into();
+        let body = format_report("daily", &s, None);
+        assert!(body.contains("paper mode"));
+        assert!(!body.contains("strategy books"));
+        assert!(!body.contains("SIMULATION"));
     }
 
     #[test]
-    fn the_live_sleeve_is_reported_above_the_simulation() {
-        // Ordering is the whole point: a reader who stops after the first
-        // number must have read a REAL one. The report used to lead with
-        // paper equity and a `pnl` line that looked exactly like live P&L.
-        use crate::ledger::{Fill, Sleeve};
-        let mut state = live_state();
-        state.live.since = "2026-09-23".into();
-        let f = |txid: &str, side: i8, cost: f64, fee: f64| Fill {
-            txid: txid.into(), ts: 0, pair: "ETHUSD".into(), side,
-            sleeve: Sleeve::Trade, book: Some("eth_1h_sf".into()),
-            qty: 0.001, cost, fee,
-        };
-        state.live.record(f("B1", 1, 2.69609, 0.00701));
-        state.live.record(f("S1", -1, 2.74829, 0.00714));
-        let body = format_report("daily", &state, &[("SOLUSD".into(), 110.0)], None);
+    fn the_1h_books_section_is_gone_from_the_live_report_too() {
+        let s = live_state();
+        let acct = account(&[("ZUSD", 1_000.0)], &[]);
+        let body = format_report("startup", &s, Some(&acct));
+        assert!(!body.contains("strategy books"));
+        assert!(!body.contains("SIMULATION"));
+        assert!(!body.contains("sol_1h_tl"));
+    }
 
-        assert!(body.contains("real Kraken fills since 2026-09-23"), "{body}");
-        // Net of the fees Kraken really charged, the round trip made about
-        // four cents. The mixed book printed -$0.11 on the identical fills.
-        assert!(body.contains("**net `+0.0380`**"), "{body}");
-        assert!(body.contains("real fees `$0.0141`"), "{body}");
+    #[test]
+    fn each_asset_weight_is_shown_against_its_effective_target() {
+        let mut s = live_state();
+        s.regime_bull.insert("XBTUSD".into(), true);
+        s.regime_bull.insert("ETHUSD".into(), true);
+        s.regime_bull.insert("SOLUSD".into(), false);
+        // $5,000 BTC / $2,500 ETH / $750 SOL / $1,750 cash = $10,000 total.
+        let acct = account(
+            &[
+                ("ZUSD", 1_750.0),
+                ("XXBT", 5_000.0 / 85_000.0),
+                ("XETH", 2_500.0 / 2_700.0),
+                ("SOL", 750.0 / 120.0),
+            ],
+            &[("XBTUSD", 85_000.0), ("ETHUSD", 2_700.0), ("SOLUSD", 120.0)],
+        );
+        let body = format_report("daily", &s, Some(&acct));
+        assert!(body.contains("**wallet** `$10000.00`"), "{body}");
         assert!(
-            body.find("live sleeve").unwrap() < body.find("strategy books").unwrap(),
-            "real money must be read before the simulation"
+            body.contains("**BTC**")
+                && body.contains("50.0%")
+                && body.contains("vs `50.0%` target (bull)"),
+            "{body}"
+        );
+        assert!(
+            body.contains("**SOL**") && body.contains("vs `7.5%` target (bear)"),
+            "{body}"
+        );
+        // Cash target with every pair read: bull+bull+bear = 50+25+7.5 = 82.5 invested, 17.5 cash.
+        assert!(
+            body.contains("**cash**") && body.contains("vs `17.5%` target"),
+            "{body}"
         );
     }
 
     #[test]
-    fn an_unpriced_holding_is_flagged_rather_than_silently_dropped() {
-        use crate::ledger::{Fill, Sleeve};
-        let mut state = live_state();
-        state.live.since = "2026-09-23".into();
-        state.live.record(Fill {
-            txid: "B1".into(), ts: 0, pair: "ETHUSD".into(), side: 1,
-            sleeve: Sleeve::Trade, book: Some("eth_1h_sf".into()),
-            qty: 0.01, cost: 27.48, fee: 0.07,
+    fn a_coin_with_no_regime_reading_yet_says_so_instead_of_a_target() {
+        let s = live_state();
+        let acct = account(&[("ZUSD", 1_000.0)], &[]);
+        let body = format_report("startup", &s, Some(&acct));
+        assert!(body.contains("regime not yet read"), "{body}");
+        assert!(body.contains("target incomplete"), "{body}");
+    }
+
+    #[test]
+    fn regime_block_shows_distance_and_the_flip_price() {
+        let mut s = live_state();
+        s.regime_reading.insert(
+            "ETHUSD".into(),
+            Reading {
+                close: 2_835.0,
+                sma: 2_700.0,
+                bull: true,
+            },
+        );
+        let acct = account(&[("ZUSD", 1_000.0)], &[]);
+        let body = format_report("daily", &s, Some(&acct));
+        // distance = 2835/2700 - 1 = +5.0%; a BULL flips at sma*(1-BAND) = 2565.00.
+        assert!(body.contains("ETHUSD** BULL"), "{body}");
+        assert!(body.contains("+5.0%"), "{body}");
+        assert!(body.contains("flips at `2565.00`"), "{body}");
+        assert!(body.contains("SOLUSD** not yet read"), "{body}");
+    }
+
+    #[test]
+    fn pending_work_lists_an_unapplied_flip_a_pending_deposit_and_an_open_order() {
+        let mut s = live_state();
+        s.regime_bull.insert("ETHUSD".into(), false);
+        s.regime_applied.insert("ETHUSD".into(), true); // stale: bull, now bear
+        s.regime_bull.insert("SOLUSD".into(), true);
+        s.regime_applied.insert("SOLUSD".into(), true); // up to date
+        s.deposit_pending = true;
+        s.pending_orders.push(PendingOrder {
+            txid: "O1".into(),
+            pair: "ETHUSD".into(),
+            side: -1,
+            placed_at: 0,
+            book: Some("rebalance:ETHUSD".into()),
+            qty: 0.01,
         });
-        let body = format_report("daily", &state, &[], None);
-        assert!(body.contains("unpriced"), "{body}");
-        assert!(body.contains("holding **ETHUSD**"), "{body}");
+        let acct = account(&[("ZUSD", 1_000.0)], &[]);
+        let body = format_report("daily", &s, Some(&acct));
+        assert!(
+            body.contains("flip(s) not yet fully applied: **ETHUSD**"),
+            "{body}"
+        );
+        assert!(
+            !body.contains("ETHUSD, SOLUSD"),
+            "SOLUSD is up to date and must not be listed"
+        );
+        assert!(
+            body.contains("investing a deposit into whatever it makes underweight"),
+            "{body}"
+        );
+        assert!(
+            body.contains("open order: sell `0.01000000` ETHUSD"),
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn no_outstanding_work_is_reported_plainly() {
+        let s = live_state();
+        let acct = account(&[("ZUSD", 1_000.0)], &[]);
+        let body = format_report("daily", &s, Some(&acct));
+        assert!(body.contains("no flips outstanding"));
+        assert!(body.contains("no open orders"));
+        assert!(!body.contains("investing a deposit"));
+    }
+
+    #[test]
+    fn deposits_this_period_lists_a_recent_flow_and_excludes_an_old_one() {
+        let mut s = live_state();
+        let now = Utc::now().timestamp();
+        s.flows.push(FlowRecord {
+            refid: "LNEW".into(),
+            ts: now - 60,
+            kind: FlowKind::Deposit,
+            asset: "USD".into(),
+            amount: 100.0,
+            usd_value: 100.0,
+        });
+        s.flows.push(FlowRecord {
+            refid: "LOLD".into(),
+            ts: now - 30 * 86_400,
+            kind: FlowKind::Deposit,
+            asset: "USD".into(),
+            amount: 50.0,
+            usd_value: 50.0,
+        });
+        s.net_deposits_usd = 150.0;
+        let acct = account(&[("ZUSD", 1_000.0)], &[]);
+        let body = format_report("daily", &s, Some(&acct));
+        assert!(body.contains("LNEW"), "{body}");
+        assert!(
+            !body.contains("LOLD"),
+            "a deposit from 30 days ago is not in TODAY's period: {body}"
+        );
+        assert!(body.contains("net deposits to date `$150.00`"), "{body}");
+    }
+
+    #[test]
+    fn a_withdrawal_never_appears_in_the_deposits_block() {
+        let mut s = live_state();
+        s.flows.push(FlowRecord {
+            refid: "LWD".into(),
+            ts: Utc::now().timestamp(),
+            kind: FlowKind::Withdrawal,
+            asset: "USD".into(),
+            amount: -20.0,
+            usd_value: 20.0,
+        });
+        let acct = account(&[("ZUSD", 1_000.0)], &[]);
+        let body = format_report("daily", &s, Some(&acct));
+        assert!(body.contains("**deposits this period**"));
+        assert!(body.contains("• none"), "{body}");
+    }
+
+    #[test]
+    fn a_failed_kraken_fetch_is_shown_without_panicking() {
+        let s = live_state();
+        let acct = AccountSnapshot::failed("timeout");
+        let body = format_report("daily", &s, Some(&acct));
+        assert!(body.contains("could not fetch: timeout"));
+    }
+
+    #[test]
+    fn no_api_keys_is_reported_distinctly_from_a_fetch_failure() {
+        let s = live_state();
+        let body = format_report("daily", &s, None);
+        assert!(body.contains("no API keys in this process"));
     }
 }

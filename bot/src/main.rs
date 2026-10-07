@@ -402,6 +402,16 @@ fn maybe_run_policy_migration(
     if state.policy_version >= 2 {
         return;
     }
+    if !m.complete() {
+        // Marks incomplete (a ticker outage on the very first post-deploy
+        // tick) must not bump policy_version with a partial adoption: that
+        // would permanently strand whichever coin had no mark with no basis
+        // on the ledger, since this whole function only ever runs once.
+        // Leaving EVERYTHING untouched — regime_applied included — and
+        // retrying next tick is what closes that gap.
+        info!("policy move: marks incomplete — retrying next tick");
+        return;
+    }
     let had = state.regime_applied.len();
     state.regime_applied.clear();
     for (pair, qty, mark) in [
@@ -1590,6 +1600,44 @@ mod work_tick_tests {
             s.last_ledger_time, now as f64,
             "migration must set the ledger baseline to NOW, not leave it at 0"
         );
+    }
+
+    #[test]
+    fn migration_with_incomplete_marks_touches_nothing_and_retries_later() {
+        // A ticker outage on the very first post-deploy tick must not bump
+        // policy_version on a PARTIAL adoption: that would permanently
+        // strand whichever coin had no mark with no basis on the ledger,
+        // since this whole function runs exactly once per state.json.
+        let mut s = paper::State::default_paper();
+        s.regime_applied.insert("XBTUSD".into(), true); // pre-existing, old policy
+        let w = alloc::Wallet {
+            usd: 100.0,
+            btc: 0.01,
+            eth: 1.0,
+            sol: 10.0,
+            ..alloc::Wallet::default()
+        };
+        let bad = alloc::Marks {
+            btc: 85_000.0,
+            eth: 0.0, // the outage
+            sol: 120.0,
+        };
+        let mut events = Vec::new();
+        maybe_run_policy_migration(&mut s, &w, bad, 1_728_000_000, &mut events);
+        assert_eq!(s.policy_version, 0, "must not bump policy_version yet");
+        assert_eq!(
+            s.last_ledger_time, 0.0,
+            "must not set the ledger baseline on a tick that did nothing"
+        );
+        assert!(
+            s.regime_applied.contains_key("XBTUSD"),
+            "must not clear regime_applied on a tick that did nothing"
+        );
+        assert!(
+            s.live.get(ledger::Sleeve::Trade, "ETHUSD").is_none(),
+            "must not adopt ANY coin's basis on a partial-mark tick"
+        );
+        assert!(events.is_empty());
     }
 
     #[tokio::test]

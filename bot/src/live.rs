@@ -54,8 +54,18 @@ pub struct LiveKraken {
 /// comparison rather than something only provable by reading every call
 /// site of `place_order_with`.
 fn post_only_options(client_order_id: &str, ttl_secs: u64) -> KrakenOrderOptions {
+    order_options(client_order_id, ttl_secs, true)
+}
+
+/// Options for a stablecoin conversion, the only order allowed to take
+/// liquidity (see `alloc::stable_sell` for why).
+fn conversion_options(client_order_id: &str, ttl_secs: u64) -> KrakenOrderOptions {
+    order_options(client_order_id, ttl_secs, false)
+}
+
+fn order_options(client_order_id: &str, ttl_secs: u64, post_only: bool) -> KrakenOrderOptions {
     KrakenOrderOptions {
-        post_only: true,
+        post_only,
         validate: false,
         client_order_id: Some(client_order_id.to_string()),
         expire_after_secs: Some(ttl_secs),
@@ -328,7 +338,8 @@ impl LiveKraken {
     /// caller's normal settlement path (`paper::plan_settlement`) is what
     /// notices and the next work tick re-prices and re-places — there is no
     /// separate "rejected" case to handle here.
-    pub async fn place_post_only(
+    #[allow(clippy::too_many_arguments)]
+    pub async fn place_limit(
         &self,
         pair: &str,
         side: i8,
@@ -336,6 +347,7 @@ impl LiveKraken {
         price: &str,
         client_order_id: &str,
         ttl_secs: u64,
+        stable_conversion: bool,
     ) -> anyhow::Result<String> {
         let side_s = if side > 0 { "buy" } else { "sell" };
         let resp = self
@@ -346,7 +358,11 @@ impl LiveKraken {
                 "limit",
                 volume,
                 Some(price),
-                &post_only_options(client_order_id, ttl_secs),
+                &if stable_conversion {
+                    conversion_options(client_order_id, ttl_secs)
+                } else {
+                    post_only_options(client_order_id, ttl_secs)
+                },
             )
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -583,6 +599,12 @@ mod tests {
         );
         assert_eq!(o.client_order_id.as_deref(), Some("abc123"));
         assert_eq!(o.expire_after_secs, Some(600));
+        let c = conversion_options("abc123", 600);
+        assert!(
+            !c.post_only,
+            "only a stablecoin conversion may take liquidity"
+        );
+        assert_eq!(c.client_order_id.as_deref(), Some("abc123"));
     }
 
     #[test]

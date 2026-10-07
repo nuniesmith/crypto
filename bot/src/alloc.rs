@@ -64,8 +64,8 @@
 //!
 //! USDC and USDT are counted into the account total at their mark (~$1, no
 //! ticker needed for that) but are not a target of anything: any balance at
-//! or above Kraken's `ordermin` of 5 is simply sold to USD, post-only at the
-//! ask (`stable_sell`), every tick, until it is gone or under the minimum.
+//! or above Kraken's `ordermin` of 5 is simply sold to USD at the bid, as a
+//! taker (`stable_sell`), every tick, until it is gone or under the minimum.
 
 use std::collections::BTreeMap;
 
@@ -405,8 +405,12 @@ pub fn gap_step(
     })
 }
 
-/// Sell a USDC or USDT balance to USD, post-only at the ask, if it is at or
-/// above Kraken's ordermin of 5. Sells the WHOLE balance (floored to
+/// Sell a USDC or USDT balance to USD at the BID, if it is at or above
+/// Kraken's ordermin of 5. This is the one order the bot lets take liquidity:
+/// a stablecoin pair's price barely moves, so a post-only sell resting at the
+/// ask sat behind a deep queue and never filled (live, 2026-10-07: every
+/// hourly attempt expired unfilled), leaving the deposit uninvested. Crossing
+/// costs the spread (about $0.0001) plus Kraken's fee on a few dollars. Sells the WHOLE balance (floored to
 /// Kraken's precision) — there is no target to leave any of it at, unlike a
 /// traded coin.
 pub fn stable_sell(balance: f64, pair: &'static str, touch: Touch) -> Option<Rebalance> {
@@ -414,14 +418,14 @@ pub fn stable_sell(balance: f64, pair: &'static str, touch: Touch) -> Option<Reb
         return None;
     }
     let q = floor_qty(balance);
-    if q < MIN_STABLE || q * touch.ask < COST_MIN_USD {
+    if q < MIN_STABLE || q * touch.bid < COST_MIN_USD {
         return None;
     }
     Some(Rebalance {
         pair,
         side: -1,
         qty: q,
-        price: touch.ask,
+        price: touch.bid,
     })
 }
 
@@ -746,14 +750,14 @@ mod tests {
     }
 
     #[test]
-    fn stable_sell_takes_the_whole_balance_at_the_ask() {
+    fn stable_sell_takes_the_whole_balance_at_the_bid() {
         let r = stable_sell(12.345, "USDTUSD", touch(0.999, 1.0001)).expect("above ordermin");
         assert_eq!(r.pair, "USDTUSD");
         assert_eq!(r.side, -1);
         assert!((r.qty - floor_qty(12.345)).abs() < 1e-12);
         assert_eq!(
-            r.price, 1.0001,
-            "a sell prices at the ASK touch, never the bid"
+            r.price, 0.999,
+            "a stablecoin sale crosses to the BID so it actually fills"
         );
     }
 

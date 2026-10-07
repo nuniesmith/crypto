@@ -570,12 +570,15 @@ fn usd_value_of(asset: &str, amount: f64, m: alloc::Marks) -> Option<f64> {
 }
 
 /// Apply one newly-seen Kraken ledger entry: record it in `state.flows` (the
-/// dedup record), fold its USD value into `net_deposits_usd`, and — for a
-/// USD-like deposit only — set `deposit_pending` so the next gap-closing
-/// pass tops up whatever it finds underweight. Returns whether it was new
-/// (`false` means a refid already on file, which is exactly the hard rule "a
-/// deposit refid is counted exactly once, even across restarts and repeated
-/// ledger pages").
+/// dedup record), fold its USD value — NET of Kraken's own `fee` on the
+/// entry — into `net_deposits_usd`, and — for a USD-like deposit only — set
+/// `deposit_pending` so the next gap-closing pass tops up whatever it finds
+/// underweight. A deposit counts as `amount - fee` (what actually landed); a
+/// withdrawal counts as `amount + fee` (what actually left, including what
+/// Kraken kept). Returns whether it was new (`false` means a refid already
+/// on file, which is exactly the hard rule "a deposit refid is counted
+/// exactly once, even across restarts and repeated ledger pages").
+#[allow(clippy::too_many_arguments)]
 fn apply_ledger_entry(
     state: &mut paper::State,
     refid: &str,
@@ -583,6 +586,7 @@ fn apply_ledger_entry(
     entry_type: &str,
     raw_asset: &str,
     amount: f64,
+    fee: f64,
     m: alloc::Marks,
 ) -> bool {
     if refid.trim().is_empty() || state.flows.iter().any(|f| f.refid == refid) {
@@ -597,8 +601,13 @@ fn apply_ledger_entry(
         warn!("ledger {refid}: non-numeric amount — skipped");
         return false;
     }
+    let fee = if fee.is_finite() { fee.max(0.0) } else { 0.0 };
+    let net_units = match kind {
+        paper::FlowKind::Deposit => (amount.abs() - fee).max(0.0),
+        paper::FlowKind::Withdrawal => amount.abs() + fee,
+    };
     let asset = normalize_asset(raw_asset).to_string();
-    let usd_value = match usd_value_of(&asset, amount.abs(), m) {
+    let usd_value = match usd_value_of(&asset, net_units, m) {
         Some(v) => v,
         None => {
             warn!("ledger {refid}: no mark for {asset} — recording at $0");
@@ -707,6 +716,10 @@ fn apply_ledger_page(
                 continue;
             }
         };
+        // An unreadable fee defaults to 0 rather than dropping the whole
+        // entry — the amount is what makes this a deposit worth recording
+        // at all; the fee only refines how much of it counts.
+        let fee: f64 = e.fee.parse().unwrap_or(0.0);
         if apply_ledger_entry(
             state,
             &e.refid,
@@ -714,6 +727,7 @@ fn apply_ledger_page(
             &e.entry_type,
             &e.asset,
             amount,
+            fee,
             m,
         ) {
             let usd = state.flows.last().map(|f| f.usd_value).unwrap_or(0.0);
@@ -1604,6 +1618,17 @@ mod work_tick_tests {
         asset: &str,
         amount: &str,
     ) -> exchange_apiws::kraken::KrakenLedgerEntry {
+        ledger_entry_with_fee(refid, time, entry_type, asset, amount, "0.00000000")
+    }
+
+    fn ledger_entry_with_fee(
+        refid: &str,
+        time: f64,
+        entry_type: &str,
+        asset: &str,
+        amount: &str,
+        fee: &str,
+    ) -> exchange_apiws::kraken::KrakenLedgerEntry {
         serde_json::from_value(serde_json::json!({
             "refid": refid,
             "time": time,
@@ -1612,7 +1637,7 @@ mod work_tick_tests {
             "aclass": "currency",
             "asset": asset,
             "amount": amount,
-            "fee": "0.00000000",
+            "fee": fee,
             "balance": "0.00000000",
         }))
         .expect("Kraken's own ledger-entry shape")
@@ -1892,6 +1917,7 @@ mod work_tick_tests {
             "deposit",
             "ZUSD",
             100.0,
+            0.0,
             m
         ));
         assert!(s.deposit_pending, "a USD deposit must set deposit_pending");
@@ -1943,6 +1969,7 @@ mod work_tick_tests {
             "deposit",
             "USDC",
             50.0,
+            0.0,
             m
         ));
         assert!(
@@ -2275,14 +2302,14 @@ mod work_tick_tests {
         let mut s = paper::State::default_paper();
         let m = marks();
         assert!(apply_ledger_entry(
-            &mut s, "LDUP", 100, "deposit", "ZUSD", 50.0, m
+            &mut s, "LDUP", 100, "deposit", "ZUSD", 50.0, 0.0, m
         ));
         assert!(s.deposit_pending);
         // The SAME refid, re-offered (a re-fetched page after a restart, or
         // simply Kraken's `start` boundary tying on the same second).
         s.deposit_pending = false; // reset, so a double-count would re-set it
         assert!(!apply_ledger_entry(
-            &mut s, "LDUP", 100, "deposit", "ZUSD", 50.0, m
+            &mut s, "LDUP", 100, "deposit", "ZUSD", 50.0, 0.0, m
         ));
         assert!(
             !s.deposit_pending,
@@ -2296,7 +2323,7 @@ mod work_tick_tests {
         let mut s = paper::State::default_paper();
         let m = marks();
         assert!(apply_ledger_entry(
-            &mut s, "LDEP", 100, "deposit", "ZUSD", 200.0, m
+            &mut s, "LDEP", 100, "deposit", "ZUSD", 200.0, 0.0, m
         ));
         s.deposit_pending = false; // simulate: already fully invested
         assert!(apply_ledger_entry(
@@ -2306,6 +2333,7 @@ mod work_tick_tests {
             "withdrawal",
             "ZUSD",
             -75.0,
+            0.0,
             m
         ));
         assert_eq!(s.net_deposits_usd, 125.0);
@@ -2318,11 +2346,91 @@ mod work_tick_tests {
     }
 
     #[test]
+    fn a_deposit_counts_net_of_krakens_own_fee() {
+        let mut s = paper::State::default_paper();
+        let m = marks();
+        // $100 arrived, but Kraken's ledger shows a $1.50 fee on the entry:
+        // only $98.50 actually landed.
+        assert!(apply_ledger_entry(
+            &mut s, "LFEE1", 100, "deposit", "ZUSD", 100.0, 1.5, m
+        ));
+        assert_eq!(
+            s.net_deposits_usd, 98.5,
+            "a deposit counts as amount - fee, not the gross amount"
+        );
+        assert_eq!(s.flows[0].usd_value, 98.5);
+        // The raw ledger amount is still kept, unmodified, for the record.
+        assert_eq!(s.flows[0].amount, 100.0);
+    }
+
+    #[test]
+    fn a_withdrawal_counts_the_fee_as_additional_money_leaving() {
+        let mut s = paper::State::default_paper();
+        let m = marks();
+        // $75 was withdrawn, plus a $2 network fee Kraken kept — $77 total
+        // left the account, even though only $75 is in `amount`.
+        assert!(apply_ledger_entry(
+            &mut s,
+            "LFEE2",
+            100,
+            "withdrawal",
+            "ZUSD",
+            -75.0,
+            2.0,
+            m
+        ));
+        assert_eq!(
+            s.net_deposits_usd, -77.0,
+            "a withdrawal counts as amount + fee, not just the amount"
+        );
+        assert_eq!(s.flows[0].usd_value, 77.0);
+    }
+
+    #[test]
+    fn a_deposit_fee_larger_than_the_amount_floors_at_zero_not_negative() {
+        // An edge case the formula must not invert: a fee that (hypothetically)
+        // exceeds the deposited amount must read as "nothing landed", never
+        // as a negative deposit.
+        let mut s = paper::State::default_paper();
+        let m = marks();
+        assert!(apply_ledger_entry(
+            &mut s, "LFEE3", 100, "deposit", "ZUSD", 1.0, 5.0, m
+        ));
+        assert_eq!(s.net_deposits_usd, 0.0);
+    }
+
+    #[test]
+    fn an_unreadable_fee_defaults_to_zero_rather_than_dropping_the_deposit() {
+        let mut s = paper::State::default_paper();
+        let baseline = 0.0;
+        let page = vec![ledger_entry_with_fee(
+            "LFEE4",
+            100.0,
+            "deposit",
+            "ZUSD",
+            "100.00000000",
+            "not-a-number",
+        )];
+        let mut newest = baseline;
+        let mut events = Vec::new();
+        apply_ledger_page(&mut s, page, baseline, marks(), &mut newest, &mut events);
+        assert_eq!(
+            s.flows.len(),
+            1,
+            "the deposit itself must still be recorded"
+        );
+        assert_eq!(
+            s.net_deposits_usd, 100.0,
+            "an unreadable fee must default to 0, not drop the deposit"
+        );
+    }
+
+    #[test]
     fn a_crypto_deposit_counts_for_performance_but_never_sets_deposit_pending() {
         let mut s = paper::State::default_paper();
         let m = marks();
         assert!(apply_ledger_entry(
-            &mut s, "LBTC", 100, "deposit", "XXBT", 0.01, m
+            &mut s, "LBTC", 100, "deposit", "XXBT", 0.01, 0.0, m
         ));
         assert!((s.net_deposits_usd - 0.01 * m.btc).abs() < 1e-6);
         assert!(
@@ -2341,6 +2449,7 @@ mod work_tick_tests {
             "deposit",
             "XRP",
             10.0,
+            0.0,
             alloc::Marks::default()
         ));
         assert_eq!(s.flows[0].usd_value, 0.0);

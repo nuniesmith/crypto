@@ -36,9 +36,10 @@ pub const BAND: f64 = 0.05;
 pub const CORE: f64 = 0.50;
 /// The coins this rule runs: every coin the account targets.
 ///
-/// **Grew from `["ETHUSD", "SOLUSD"]` to all three on 2026-10-05** — see
-/// `alloc.rs` for the account-level policy this feeds.
-pub const PAIRS: [&str; 3] = ["XBTUSD", "ETHUSD", "SOLUSD"];
+/// **Grew from `["ETHUSD", "SOLUSD"]` to all three on 2026-10-05, and to
+/// six on 2026-10-08** with the LINK/XRP/INJ satellites — see `alloc.rs`
+/// for the account-level policy this feeds.
+pub const PAIRS: [&str; 6] = ["XBTUSD", "ETHUSD", "SOLUSD", "LINKUSD", "XRPUSD", "INJUSD"];
 
 /// One day's reading for a coin.
 ///

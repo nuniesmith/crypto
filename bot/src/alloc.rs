@@ -8,13 +8,14 @@
 //! to a band.
 //!
 //! The operator replaced that with ONE account targeting its TOTAL value
-//! directly: **BTC 50%, ETH 25%, SOL 15%, cash 10%** at the bull floor, with
+//! directly: **BTC 50%, ETH 25%, SOL 15%, LINK 2%, XRP 2%, INJ 2%, cash 4%**
+//! at the bull floor, with
 //! the SAME regime rule (`regime.rs`) now sizing all three coins instead of
 //! two of them against a frozen BTC pile. A coin's EFFECTIVE target is its
 //! base weight scaled by `regime::exposure` for the regime it is in: all of
 //! it in a bull, half (`regime::CORE`) in a bear. Cash is whatever is left
-//! once the three coins' effective targets are subtracted — 10% when every
-//! coin is bull, up to 55% when all three are bear.
+//! once the six coins' effective targets are subtracted — 4% when every
+//! coin is bull, up to 52% when all six are bear.
 //!
 //! `src/crypto/opt/portfolio.py` (branch `research/swing-tranches`) simulated
 //! this account against a 5/25-rebalanced version of the same targets and a
@@ -75,6 +76,12 @@ pub const BASE_BTC: f64 = 0.50;
 pub const BASE_ETH: f64 = 0.25;
 /// SOL's share of the account total at the bull floor.
 pub const BASE_SOL: f64 = 0.15;
+/// LINK's share of the account total at the bull floor (2% satellite).
+pub const BASE_LINK: f64 = 0.02;
+/// XRP's share of the account total at the bull floor (2% satellite).
+pub const BASE_XRP: f64 = 0.02;
+/// INJ's share of the account total at the bull floor (2% satellite).
+pub const BASE_INJ: f64 = 0.02;
 // Cash has no constant of its own: it is always `1 - sum(effective coin
 // targets)`, which is how a flip that shrinks a coin's target grows cash
 // automatically rather than needing its own rule.
@@ -86,6 +93,11 @@ pub const COST_MIN_USD: f64 = 0.50;
 pub const MIN_BTC: f64 = 0.00005;
 pub const MIN_ETH: f64 = 0.001;
 pub const MIN_SOL: f64 = 0.06;
+/// Kraken `ordermin`s for the satellites (verified 2026-10-08):
+/// LINK 0.55 / XRP 1.65 / INJ 0.7.
+pub const MIN_LINK: f64 = 0.55;
+pub const MIN_XRP: f64 = 1.65;
+pub const MIN_INJ: f64 = 0.7;
 /// Kraken `ordermin` for the USDC/USDT-USD pairs, in units of the stablecoin.
 pub const MIN_STABLE: f64 = 5.0;
 /// A buy spends at most this fraction of `usd_available()`. Kraken reserves
@@ -131,6 +143,9 @@ pub struct Wallet {
     pub btc: f64,
     pub eth: f64,
     pub sol: f64,
+    pub link: f64,
+    pub xrp: f64,
+    pub inj: f64,
     /// Counted into the account total at $1 each; never a rebalancing
     /// target — see `stable_sell`.
     pub usdc: f64,
@@ -158,6 +173,9 @@ impl Wallet {
                 "XXBT" | "XBT" | "BTC" => w.btc += *amt,
                 "XETH" | "ETH" => w.eth += *amt,
                 "SOL" => w.sol += *amt,
+                "LINK" => w.link += *amt,
+                "XXRP" | "XRP" => w.xrp += *amt,
+                "INJ" => w.inj += *amt,
                 "USDC" => w.usdc += *amt,
                 "USDT" => w.usdt += *amt,
                 _ => {}
@@ -166,12 +184,15 @@ impl Wallet {
         w
     }
 
-    /// Coins held of one of the three traded pairs; 0.0 for anything else.
+    /// Coins held of one of the six traded pairs; 0.0 for anything else.
     pub fn coin(&self, pair: &str) -> f64 {
         match pair {
             "XBTUSD" => self.btc,
             "ETHUSD" => self.eth,
             "SOLUSD" => self.sol,
+            "LINKUSD" => self.link,
+            "XRPUSD" => self.xrp,
+            "INJUSD" => self.inj,
             _ => 0.0,
         }
     }
@@ -181,6 +202,9 @@ impl Wallet {
             "XBTUSD" => MIN_BTC,
             "ETHUSD" => MIN_ETH,
             "SOLUSD" => MIN_SOL,
+            "LINKUSD" => MIN_LINK,
+            "XRPUSD" => MIN_XRP,
+            "INJUSD" => MIN_INJ,
             _ => f64::MAX,
         }
     }
@@ -192,6 +216,9 @@ impl Wallet {
             "XBTUSD" => BASE_BTC,
             "ETHUSD" => BASE_ETH,
             "SOLUSD" => BASE_SOL,
+            "LINKUSD" => BASE_LINK,
+            "XRPUSD" => BASE_XRP,
+            "INJUSD" => BASE_INJ,
             _ => 0.0,
         }
     }
@@ -206,6 +233,9 @@ pub struct Marks {
     pub btc: f64,
     pub eth: f64,
     pub sol: f64,
+    pub link: f64,
+    pub xrp: f64,
+    pub inj: f64,
 }
 
 impl Marks {
@@ -216,6 +246,9 @@ impl Marks {
                 "XBTUSD" => m.btc = *px,
                 "ETHUSD" => m.eth = *px,
                 "SOLUSD" => m.sol = *px,
+                "LINKUSD" => m.link = *px,
+                "XRPUSD" => m.xrp = *px,
+                "INJUSD" => m.inj = *px,
                 _ => {}
             }
         }
@@ -228,6 +261,7 @@ impl Marks {
     /// must refuse to size anything rather than proceed with a partial view.
     pub fn complete(&self) -> bool {
         self.btc > 0.0 && self.eth > 0.0 && self.sol > 0.0
+            && self.link > 0.0 && self.xrp > 0.0 && self.inj > 0.0
     }
 
     /// The price of one traded pair, 0.0 for one this struct does not mark.
@@ -236,6 +270,9 @@ impl Marks {
             "XBTUSD" => self.btc,
             "ETHUSD" => self.eth,
             "SOLUSD" => self.sol,
+            "LINKUSD" => self.link,
+            "XRPUSD" => self.xrp,
+            "INJUSD" => self.inj,
             _ => 0.0,
         }
     }

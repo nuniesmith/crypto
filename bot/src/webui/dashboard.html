@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Crypto Bot</title>
+<style>
+  :root{--bg:#0e1116;--card:#171c24;--line:#262d38;--txt:#e8ecf1;--mut:#9aa4b2;
+    --acc:#4da3ff;--grn:#3fd68c;--red:#ff6b6b;--amb:#ffb84d;}
+  *{box-sizing:border-box;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}
+  body{background:var(--bg);color:var(--txt);margin:0;padding:24px 16px 48px;}
+  .wrap{max-width:860px;margin:0 auto;}
+  h1{font-size:22px;margin:0;}
+  .top{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:12px;}
+  .status{display:inline-flex;align-items:center;gap:8px;font-size:14px;font-weight:600;
+    padding:8px 16px;border-radius:999px;border:1px solid var(--line);}
+  .dot{width:10px;height:10px;border-radius:50%;}
+  .dot.on{background:var(--grn);box-shadow:0 0 8px var(--grn);}
+  .dot.off{background:var(--red);box-shadow:0 0 8px var(--red);}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px;margin-bottom:16px;}
+  .btn{background:var(--acc);color:#04121f;border:none;border-radius:10px;padding:11px 22px;
+    font-size:15px;font-weight:700;cursor:pointer;}
+  .btn.stop{background:var(--red);color:#1f0404;}
+  .btn:disabled{opacity:.45;cursor:default;}
+  .btnrow{display:flex;gap:10px;}
+  table{width:100%;border-collapse:collapse;font-size:14px;}
+  th{text-align:left;color:var(--mut);font-weight:600;font-size:12px;text-transform:uppercase;
+    letter-spacing:.4px;padding:10px 8px;border-bottom:1px solid var(--line);}
+  td{padding:11px 8px;border-bottom:1px solid var(--line);font-variant-numeric:tabular-nums;}
+  tr:last-child td{border-bottom:none;}
+  td.n,th.n{text-align:right;}
+  .bull{color:var(--grn);font-weight:700;}
+  .bear{color:var(--amb);font-weight:700;}
+  .kpi{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:16px;}
+  @media(max-width:640px){.kpi{grid-template-columns:1fr;}}
+  .kpi .card{margin:0;text-align:center;}
+  .kpi .v{font-size:26px;font-weight:800;font-variant-numeric:tabular-nums;}
+  .kpi .l{font-size:12px;color:var(--mut);text-transform:uppercase;letter-spacing:.5px;margin-top:4px;}
+  nav{display:flex;gap:8px;margin-bottom:16px;}
+  nav a{color:var(--txt);text-decoration:none;font-size:14px;padding:8px 16px;border-radius:999px;
+    border:1px solid var(--line);}
+  nav a.on{border-color:var(--acc);color:var(--acc);}
+  .note{font-size:12px;color:var(--mut);}
+  .err{color:var(--red);font-size:13px;margin-top:8px;min-height:18px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <h1>Crypto Bot</h1>
+    <span class="status"><span class="dot off" id="dot"></span><span id="stext">Stopped</span></span>
+  </div>
+  <nav>
+    <a href="/" class="on">Dashboard</a>
+    <a href="/forecast">Forecast calculator</a>
+  </nav>
+
+  <div class="kpi">
+    <div class="card"><div class="v" id="ktotal">$–</div><div class="l">Total value</div></div>
+    <div class="card"><div class="v" id="kcash" style="color:var(--acc)">$–</div><div class="l">Cash</div></div>
+    <div class="card"><div class="v" id="kkraken" style="color:var(--mut)">–</div><div class="l">Kraken link</div></div>
+  </div>
+
+  <div class="card">
+    <div class="btnrow">
+      <button class="btn" id="bstart" onclick="ctl('start')">Start bot</button>
+      <button class="btn stop" id="bstop" onclick="ctl('stop')">Stop bot</button>
+    </div>
+    <div class="err" id="err"></div>
+    <p class="note">Start launches the live trading loop (real Kraken orders).
+    Stop kills it. The web UI keeps running either way.</p>
+  </div>
+
+  <div class="card">
+    <table>
+      <thead><tr><th>Pair</th><th>Regime</th><th class="n">Target</th>
+      <th class="n">Holding</th><th class="n">Holding %</th></tr></thead>
+      <tbody id="rows"><tr><td colspan="5" class="note">loading…</td></tr></tbody>
+    </table>
+  </div>
+</div>
+<script>
+const $=id=>document.getElementById(id);
+const fmt$=n=>'$'+Math.round(n).toLocaleString('en-US');
+async function refresh(){
+  try{
+    const r=await fetch('/api/status'); const s=await r.json();
+    $('dot').className='dot '+(s.running?'on':'off');
+    $('stext').textContent=s.running?'Running':'Stopped';
+    $('bstart').disabled=s.running; $('bstop').disabled=!s.running;
+    $('ktotal').textContent=fmt$(s.total_usd);
+    $('kcash').textContent=fmt$(s.cash_usd)+'  ('+s.cash_target_pct.toFixed(1)+'% tgt)';
+    $('kkraken').textContent=s.kraken_ok?'connected':'no keys';
+    $('kkraken').style.color=s.kraken_ok?'var(--grn)':'var(--mut)';
+    const tb=$('rows'); tb.innerHTML='';
+    s.pairs.forEach(p=>{
+      const tr=document.createElement('tr');
+      const reg=p.bull==null?'<span class="note">—</span>':
+        p.bull?'<span class="bull">BULL</span>':'<span class="bear">BEAR</span>';
+      tr.innerHTML='<td><b>'+p.pair.replace('USD','')+'</b></td><td>'+reg+'</td>'+
+        '<td class="n">'+p.target_pct.toFixed(1)+'%</td>'+
+        '<td class="n">'+fmt$(p.holding_usd)+'</td>'+
+        '<td class="n">'+p.holding_pct.toFixed(1)+'%</td>';
+      tb.appendChild(tr);
+    });
+  }catch(e){ $('err').textContent='status fetch failed'; }
+}
+async function ctl(which){
+  $('err').textContent='';
+  try{
+    const r=await fetch('/api/'+which,{method:'POST'});
+    const j=await r.json();
+    if(!j.ok) $('err').textContent=j.error||'failed';
+  }catch(e){ $('err').textContent='request failed'; }
+  refresh();
+}
+refresh(); setInterval(refresh,30000);
+</script>
+</body>
+</html>

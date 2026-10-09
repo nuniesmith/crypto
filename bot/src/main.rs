@@ -31,6 +31,7 @@ mod paper;
 mod paper_ex;
 mod regime;
 mod signal;
+mod webui;
 
 use paper::{append_journal, load_state, print_status, save_state};
 
@@ -77,6 +78,8 @@ Usage:
   crypto-bot live --dry-run     preview: real wallet read, no orders placed
   crypto-bot live --confirm I_UNDERSTAND_REAL_MONEY
                                 real Kraken post-only orders (KRAKEN_API_KEY/SECRET)
+  crypto-bot webui [--port 8090]
+                                dashboard + start/stop + forecast calculator
   crypto-bot rebalance --dry-run
   crypto-bot rebalance --confirm I_UNDERSTAND_REAL_MONEY
                                 mark every coin pending so the next work tick
@@ -130,6 +133,14 @@ async fn main() -> anyhow::Result<()> {
                      Real money: `crypto-bot live --confirm I_UNDERSTAND_REAL_MONEY`"
                 );
             }
+        }
+        "webui" => {
+            let port = args
+                .windows(2)
+                .find(|w| w[0] == "--port")
+                .and_then(|w| w[1].parse::<u16>().ok())
+                .unwrap_or(8090);
+            webui::serve(port).await
         }
         "rebalance" => {
             if confirm {

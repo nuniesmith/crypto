@@ -38,7 +38,7 @@ pub const CORE: f64 = 0.50;
 ///
 /// **Grew from `["ETHUSD", "SOLUSD"]` to all three on 2026-10-05** — see
 /// `alloc.rs` for the account-level policy this feeds.
-pub const PAIRS: [&str; 3] = ["XBTUSD", "ETHUSD", "SOLUSD"];
+pub const PAIRS: [&str; 6] = ["XBTUSD", "ETHUSD", "SOLUSD", "LINKUSD", "XRPUSD", "INJUSD"];
 
 /// One day's reading for a coin.
 ///

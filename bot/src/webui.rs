@@ -220,10 +220,7 @@ async fn api_status(State(state): State<Arc<WebState>>) -> Json<StatusResponse> 
     })
 }
 
-async fn api_start(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
-    if bot_running(&state).await {
-        return Json(serde_json::json!({"ok": false, "error": "bot already running"}));
-    }
+async fn start_bot(state: &Arc<WebState>) -> Result<(), String> {
     let exe = std::env::current_exe().unwrap_or_else(|_| "crypto-bot".into());
     match tokio::process::Command::new(exe)
         .arg("live")
@@ -235,12 +232,22 @@ async fn api_start(State(state): State<Arc<WebState>>) -> Json<serde_json::Value
         Ok(child) => {
             info!("webui: started trading loop (pid {:?})", child.id());
             *state.bot_child.lock().await = Some(child);
-            Json(serde_json::json!({"ok": true}))
+            Ok(())
         }
         Err(e) => {
             warn!("webui: failed to start bot: {e:#}");
-            Json(serde_json::json!({"ok": false, "error": format!("{e:#}")}))
+            Err(format!("{e:#}"))
         }
+    }
+}
+
+async fn api_start(State(state): State<Arc<WebState>>) -> Json<serde_json::Value> {
+    if bot_running(&state).await {
+        return Json(serde_json::json!({"ok": false, "error": "bot already running"}));
+    }
+    match start_bot(&state).await {
+        Ok(()) => Json(serde_json::json!({"ok": true})),
+        Err(e) => Json(serde_json::json!({"ok": false, "error": e})),
     }
 }
 
@@ -268,11 +275,16 @@ async fn forecast_page() -> Html<&'static str> {
 }
 
 /// Start the WebUI HTTP server. Runs until killed.
-pub async fn serve(port: u16) -> anyhow::Result<()> {
+/// If `autostart` is true, the trading loop is launched immediately.
+pub async fn serve(port: u16, autostart: bool) -> anyhow::Result<()> {
     let state = Arc::new(WebState {
         bot_child: Mutex::new(None),
         holdings_cache: Mutex::new(None),
     });
+    if autostart && !bot_running(&state).await {
+        info!("webui: autostart enabled — launching trading loop");
+        start_bot(&state).await;
+    }
     let app = axum::Router::new()
         .route("/", get(dashboard))
         .route("/forecast", get(forecast_page))

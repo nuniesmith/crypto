@@ -54,4 +54,4 @@ ENTRYPOINT ["crypto-bot"]
 # Default: WebUI, which manages the trading loop as a child process via the
 # dashboard's start/stop. Override per deploy (e.g. "live --confirm ..." for
 # loop-only without the web server).
-CMD ["webui", "--port", "8090"]
+CMD ["webui", "--port", "8090", "--autostart"]

@@ -78,8 +78,10 @@ Usage:
   crypto-bot live --dry-run     preview: real wallet read, no orders placed
   crypto-bot live --confirm I_UNDERSTAND_REAL_MONEY
                                 real Kraken post-only orders (KRAKEN_API_KEY/SECRET)
-  crypto-bot webui [--port 8090]
+  crypto-bot webui [--port 8090] [--autostart]
                                 dashboard + start/stop + forecast calculator
+                                (--autostart launches the trading loop on start;
+                                 or set CRYPTO_WEBUI_AUTOSTART=1)
   crypto-bot rebalance --dry-run
   crypto-bot rebalance --confirm I_UNDERSTAND_REAL_MONEY
                                 mark every coin pending so the next work tick
@@ -140,7 +142,9 @@ async fn main() -> anyhow::Result<()> {
                 .find(|w| w[0] == "--port")
                 .and_then(|w| w[1].parse::<u16>().ok())
                 .unwrap_or(8090);
-            webui::serve(port).await
+            let autostart = args.iter().any(|a| a == "--autostart")
+                || std::env::var("CRYPTO_WEBUI_AUTOSTART").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
+            webui::serve(port, autostart).await
         }
         "rebalance" => {
             if confirm {

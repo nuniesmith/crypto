@@ -15,14 +15,15 @@ WORKDIR /src
 # Copy manifests first so dependency compilation is cached in its own layer.
 COPY bot/Cargo.toml bot/Cargo.lock ./bot/
 
-# Warm the dependency cache with a stub binary (rebuilt for real below).
+# Warm the dependency cache with the real sources (stub main to avoid
+# compiling the full binary twice).
 RUN mkdir -p bot/src \
     && printf 'fn main() {}\n' > bot/src/main.rs \
-    && cd bot && cargo build --release 2>/dev/null; rm -rf bot/src
+    && cd bot && cargo build --release 2>/dev/null; true
 
-# Now the real source.
+# Now the real source — touch to force cargo to rebuild the binary itself.
 COPY bot ./bot
-RUN cd bot && cargo build --release
+RUN cd bot && touch src/main.rs && cargo build --release
 
 # ---------- runtime stage ----------
 FROM debian:bookworm-slim

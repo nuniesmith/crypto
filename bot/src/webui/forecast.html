@@ -51,6 +51,9 @@
     input[type="number"]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent); }
     input[type="range"] { width: 100%; height: 26px; margin: 8px 0 0; accent-color: var(--accent); cursor: pointer; }
     .range-labels { display: flex; justify-content: space-between; color: var(--muted); font-family: "IBM Plex Mono", monospace; font-size: .7rem; }
+    .topnav { display: flex; gap: 8px; margin-bottom: 26px; }
+    .topnav a { color: var(--ink); text-decoration: none; font-size: .85rem; font-weight: 600; padding: 8px 18px; border-radius: 999px; border: 1px solid var(--line-strong); }
+    .topnav a.on { border-color: var(--accent); color: var(--accent); }
     .presets { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-top: 10px; }
     .preset { border: 1px solid var(--line); background: var(--panel-soft); border-radius: 999px; padding: 7px 5px; font-family: "IBM Plex Mono", monospace; font-size: .72rem; cursor: pointer; }
     .preset:hover, .preset:focus-visible { border-color: var(--accent); outline: none; }
@@ -138,6 +141,10 @@
 </head>
 <body>
   <main>
+    <nav class="topnav" aria-label="Site">
+      <a href="/">Dashboard</a>
+      <a href="/forecast" class="on">Forecast calculator</a>
+    </nav>
     <section class="intro" aria-labelledby="page-heading">
       <h1 id="page-heading">Model the road ahead.</h1>
       <p>Enter today’s portfolio value, a weekly addition, and an annual growth assumption. The forecast compounds weekly across eight practical time horizons.</p>

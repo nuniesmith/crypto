@@ -26,6 +26,9 @@ RUN cd bot && cargo build --release
 
 # ---------- runtime stage ----------
 FROM debian:bookworm-slim
+# curl for the compose healthcheck (probes the WebUI /api/status).
+RUN apt-get update && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
 
 # TLS roots for Kraken/Discord HTTPS (bot uses rustls; no OpenSSL needed).
 RUN apt-get update \

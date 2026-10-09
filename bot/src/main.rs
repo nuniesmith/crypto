@@ -396,7 +396,22 @@ fn maybe_run_policy_migration(
     now: i64,
     events: &mut Vec<String>,
 ) {
-    if state.policy_version >= 2 {
+    if state.policy_version >= 3 {
+        return;
+    }
+    if state.policy_version == 2 {
+        // v2 -> v3: satellite targets moved 2% -> 5% each (BTC 44/ETH 22/SOL 12/cash 7).
+        // `regime_applied` only tracks the bull/bear flag, not the target %, so it is
+        // stale — clear it so every pair is re-sized to its new effective target.
+        let had = state.regime_applied.len();
+        state.regime_applied.clear();
+        state.policy_version = 3;
+        let msg = format!(
+            "POLICY move to v3: satellites 2% -> 5% each (BTC 44/ETH 22/SOL 12/cash 7) — \
+             cleared {had} previously-applied pair(s) so every coin is sized to its new target"
+        );
+        info!("{msg}");
+        events.push(msg);
         return;
     }
     if !m.complete() {
@@ -1589,14 +1604,21 @@ mod work_tick_tests {
             "migration must set the ledger baseline to NOW"
         );
 
-        // Idempotent: a second run (e.g. the very next tick) does nothing.
+        // A second run (the very next tick) takes v2 -> v3: satellite targets
+        // moved 2% -> 5%, so regime_applied is cleared for re-sizing.
         let mut again = Vec::new();
         maybe_run_policy_migration(&mut s, &w, m, now + 3600, &mut again);
-        assert!(again.is_empty());
-        assert_eq!(s.policy_version, 2);
+        assert_eq!(s.policy_version, 3);
+        assert!(s.regime_applied.is_empty());
+        assert!(again.iter().any(|e| e.contains("POLICY move to v3")));
+        // A third run does nothing: fully idempotent from here.
+        let mut third = Vec::new();
+        maybe_run_policy_migration(&mut s, &w, m, now + 7200, &mut third);
+        assert!(third.is_empty());
+        assert_eq!(s.policy_version, 3);
         assert_eq!(
             s.last_ledger_time, now as f64,
-            "a second run must not move the baseline again"
+            "later runs must not move the baseline again"
         );
     }
 

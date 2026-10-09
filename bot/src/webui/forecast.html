@@ -140,7 +140,7 @@
   <main>
     <section class="intro" aria-labelledby="page-heading">
       <h1 id="page-heading">Model the road ahead.</h1>
-      <p>Enter today’s portfolio value, a weekly addition, and an annual growth assumption. The forecast compounds weekly across six practical time horizons.</p>
+      <p>Enter today’s portfolio value, a weekly addition, and an annual growth assumption. The forecast compounds weekly across eight practical time horizons.</p>
     </section>
 
     <div class="workspace">
@@ -157,11 +157,11 @@
         </div>
         <div class="field">
           <div class="field-top"><label for="annual-return">Projected annual growth</label><span class="hint">Not guaranteed</span></div>
-          <div class="percent-input"><input id="annual-return" type="number" min="-90" max="200" step="0.5" inputmode="decimal" value="15" /><span aria-hidden="true">%</span></div>
-          <input id="return-range" type="range" min="-20" max="60" step="1" value="15" aria-label="Projected annual growth slider" />
+          <div class="percent-input"><input id="annual-return" type="number" min="-90" max="200" step="0.5" inputmode="decimal" value="20" /><span aria-hidden="true">%</span></div>
+          <input id="return-range" type="range" min="-20" max="60" step="1" value="20" aria-label="Projected annual growth slider" />
           <div class="range-labels"><span>−20%</span><span>20%</span><span>60%</span></div>
           <div class="presets" aria-label="Return presets">
-            <button class="preset" type="button" data-return="5">5%</button><button class="preset" type="button" data-return="10">10%</button><button class="preset active" type="button" data-return="15">15%</button><button class="preset" type="button" data-return="25">25%</button>
+            <button class="preset" type="button" data-return="5">5%</button><button class="preset" type="button" data-return="10">10%</button><button class="preset active" type="button" data-return="20">20%</button><button class="preset" type="button" data-return="25">25%</button>
           </div>
         </div>
         <button class="reset" id="reset-button" type="button">Reset assumptions</button>
@@ -221,8 +221,9 @@
       var chart = document.getElementById("forecast-chart");
       var presets = Array.prototype.slice.call(document.querySelectorAll(".preset"));
       var horizons = [
-        { label: "1 month", weeks: 4 }, { label: "6 months", weeks: 26 }, { label: "1 year", weeks: 52 },
-        { label: "3 years", weeks: 156 }, { label: "5 years", weeks: 260 }, { label: "10 years", weeks: 520 }
+        { label: "1 month", weeks: 4 }, { label: "3 months", weeks: 13 }, { label: "6 months", weeks: 26 },
+        { label: "1 year", weeks: 52 }, { label: "2 years", weeks: 104 }, { label: "3 years", weeks: 156 },
+        { label: "5 years", weeks: 260 }, { label: "10 years", weeks: 520 }
       ];
       var currency = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
       var compact = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 });

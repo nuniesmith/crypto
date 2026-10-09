@@ -70,17 +70,17 @@
 use std::collections::BTreeMap;
 
 /// BTC's share of the account total at the bull floor (regime exposure 1.0).
-pub const BASE_BTC: f64 = 0.50;
+pub const BASE_BTC: f64 = 0.44;
 /// ETH's share of the account total at the bull floor.
-pub const BASE_ETH: f64 = 0.25;
+pub const BASE_ETH: f64 = 0.22;
 /// SOL's share of the account total at the bull floor.
-pub const BASE_SOL: f64 = 0.15;
+pub const BASE_SOL: f64 = 0.12;
 /// LINK's share of the account total at the bull floor (2% satellite).
-pub const BASE_LINK: f64 = 0.02;
+pub const BASE_LINK: f64 = 0.05;
 /// XRP's share of the account total at the bull floor (2% satellite).
-pub const BASE_XRP: f64 = 0.02;
+pub const BASE_XRP: f64 = 0.05;
 /// INJ's share of the account total at the bull floor (2% satellite).
-pub const BASE_INJ: f64 = 0.02;
+pub const BASE_INJ: f64 = 0.05;
 // Cash has no constant of its own: it is always `1 - sum(effective coin
 // targets)`, which is how a flip that shrinks a coin's target grows cash
 // automatically rather than needing its own rule.
@@ -191,9 +191,6 @@ impl Wallet {
             "LINKUSD" => self.link,
             "XRPUSD" => self.xrp,
             "INJUSD" => self.inj,
-            "LINKUSD" => self.link,
-            "XRPUSD" => self.xrp,
-            "INJUSD" => self.inj,
             _ => 0.0,
         }
     }
@@ -274,9 +271,6 @@ impl Marks {
             "LINKUSD" => self.link,
             "XRPUSD" => self.xrp,
             "INJUSD" => self.inj,
-            "LINKUSD" => self.link,
-            "XRPUSD" => self.xrp,
-            "INJUSD" => self.inj,
             _ => 0.0,
         }
     }
@@ -324,6 +318,9 @@ pub fn total_usd(w: &Wallet, m: Marks) -> f64 {
         + w.btc * m.btc.max(0.0)
         + w.eth * m.eth.max(0.0)
         + w.sol * m.sol.max(0.0)
+        + w.link * m.link.max(0.0)
+        + w.xrp * m.xrp.max(0.0)
+        + w.inj * m.inj.max(0.0)
         + w.usdc.max(0.0)
         + w.usdt.max(0.0)
 }
@@ -402,6 +399,9 @@ pub fn gap_step(
         "XBTUSD" => "XBTUSD",
         "ETHUSD" => "ETHUSD",
         "SOLUSD" => "SOLUSD",
+        "LINKUSD" => "LINKUSD",
+        "XRPUSD" => "XRPUSD",
+        "INJUSD" => "INJUSD",
         _ => return GapStep::AtTarget,
     };
     let total = total_usd(w, m);
@@ -479,6 +479,9 @@ mod tests {
             btc: 85_000.0,
             eth: 2_700.0,
             sol: 120.0,
+            link: 14.0,
+            xrp: 1.5,
+            inj: 7.4,
         }
     }
 
@@ -497,6 +500,7 @@ mod tests {
             sol: 100.0 / marks().sol,
             usdc: 0.0,
             usdt: 0.0,
+            ..Wallet::default()
         }
     }
 
@@ -530,25 +534,31 @@ mod tests {
     }
 
     #[test]
-    fn effective_weights_sum_to_ninety_percent_in_an_all_bull_account() {
+    fn effective_weights_sum_to_ninety_three_percent_in_an_all_bull_account() {
         let sum = effective_weight("XBTUSD", true)
             + effective_weight("ETHUSD", true)
-            + effective_weight("SOLUSD", true);
-        assert!((sum - 0.90).abs() < 1e-9, "sum={sum}");
+            + effective_weight("SOLUSD", true)
+            + effective_weight("LINKUSD", true)
+            + effective_weight("XRPUSD", true)
+            + effective_weight("INJUSD", true);
+        assert!((sum - 0.93).abs() < 1e-9, "sum={sum}");
         let mut bulls = BTreeMap::new();
         bulls.insert("XBTUSD".to_string(), true);
         bulls.insert("ETHUSD".to_string(), true);
         bulls.insert("SOLUSD".to_string(), true);
-        assert!((cash_weight(&bulls).unwrap() - 0.10).abs() < 1e-9);
+        bulls.insert("LINKUSD".to_string(), true);
+        bulls.insert("XRPUSD".to_string(), true);
+        bulls.insert("INJUSD".to_string(), true);
+        assert!((cash_weight(&bulls).unwrap() - 0.07).abs() < 1e-9);
     }
 
     #[test]
-    fn an_all_bear_account_wants_up_to_fifty_five_percent_cash() {
+    fn an_all_bear_account_wants_up_to_fifty_three_point_five_percent_cash() {
         let mut bears = BTreeMap::new();
         for p in crate::regime::PAIRS {
             bears.insert(p.to_string(), false);
         }
-        assert!((cash_weight(&bears).unwrap() - 0.55).abs() < 1e-9);
+        assert!((cash_weight(&bears).unwrap() - 0.535).abs() < 1e-9);
     }
 
     #[test]
@@ -583,10 +593,13 @@ mod tests {
     fn a_coin_already_at_its_bull_target_places_nothing() {
         let total = 1_000.0;
         let w = Wallet {
-            usd: total * 0.10,
+            usd: total * 0.07,
             btc: (total * BASE_BTC) / marks().btc,
             eth: (total * BASE_ETH) / marks().eth,
             sol: (total * BASE_SOL) / marks().sol,
+            link: (total * BASE_LINK) / marks().link,
+            xrp: (total * BASE_XRP) / marks().xrp,
+            inj: (total * BASE_INJ) / marks().inj,
             ..Wallet::default()
         };
         for pair in crate::regime::PAIRS {
@@ -844,6 +857,7 @@ mod tests {
                 btc: 100.5,
                 eth: 2_700.0,
                 sol: 120.0,
+                ..marks()
             },
             t,
             "XBTUSD",
@@ -870,6 +884,7 @@ mod tests {
                 btc: 100.5,
                 eth: 2_700.0,
                 sol: 120.0,
+                ..marks()
             },
             t,
             "XBTUSD",

@@ -354,6 +354,9 @@ mod tests {
         s.regime_bull.insert("XBTUSD".into(), true);
         s.regime_bull.insert("ETHUSD".into(), true);
         s.regime_bull.insert("SOLUSD".into(), false);
+        s.regime_bull.insert("LINKUSD".into(), true);
+        s.regime_bull.insert("XRPUSD".into(), true);
+        s.regime_bull.insert("INJUSD".into(), true);
         // $5,000 BTC / $2,500 ETH / $750 SOL / $1,750 cash = $10,000 total.
         let acct = account(
             &[
@@ -362,23 +365,24 @@ mod tests {
                 ("XETH", 2_500.0 / 2_700.0),
                 ("SOL", 750.0 / 120.0),
             ],
-            &[("XBTUSD", 85_000.0), ("ETHUSD", 2_700.0), ("SOLUSD", 120.0)],
+            &[("XBTUSD", 85_000.0), ("ETHUSD", 2_700.0), ("SOLUSD", 120.0),
+              ("LINKUSD", 14.0), ("XRPUSD", 1.5), ("INJUSD", 7.4)],
         );
         let body = format_report("daily", &s, Some(&acct));
         assert!(body.contains("**wallet** `$10000.00`"), "{body}");
         assert!(
             body.contains("**BTC**")
                 && body.contains("50.0%")
-                && body.contains("vs `50.0%` target (bull)"),
+                && body.contains("vs `44.0%` target (bull)"),
             "{body}"
         );
         assert!(
-            body.contains("**SOL**") && body.contains("vs `7.5%` target (bear)"),
+            body.contains("**SOL**") && body.contains("vs `6.0%` target (bear)"),
             "{body}"
         );
-        // Cash target with every pair read: bull+bull+bear = 50+25+7.5 = 82.5 invested, 17.5 cash.
+        // Cash target with every pair read: 44+22+6+5+5+5 = 87 invested, 13 cash.
         assert!(
-            body.contains("**cash**") && body.contains("vs `17.5%` target"),
+            body.contains("**cash**") && body.contains("vs `13.0%` target"),
             "{body}"
         );
     }

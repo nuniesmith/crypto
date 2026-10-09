@@ -411,11 +411,9 @@ fn maybe_run_policy_migration(
     }
     let had = state.regime_applied.len();
     state.regime_applied.clear();
-    for (pair, qty, mark) in [
-        ("XBTUSD", w.btc, m.btc),
-        ("ETHUSD", w.eth, m.eth),
-        ("SOLUSD", w.sol, m.sol),
-    ] {
+    for pair in crate::regime::PAIRS {
+        let qty = w.coin(pair);
+        let mark = m.of(pair);
         if qty > 0.0 && mark > 0.0 {
             state.live.adopt(ledger::Sleeve::Trade, pair, qty, mark);
         }
@@ -1573,12 +1571,16 @@ mod work_tick_tests {
         // gave the wallet's current holdings a basis to sell against.
         assert_eq!(s.live.fills.len(), 1);
         for pair in regime::PAIRS {
-            assert!(
-                s.live
-                    .get(ledger::Sleeve::Trade, pair)
-                    .is_some_and(|p| p.qty > 0.0),
-                "{pair} must have an adopted basis after the move"
-            );
+            // Only pairs the pre-policy wallet actually held get a basis;
+            // the satellites did not exist under the old policy.
+            if w.coin(pair) > 0.0 {
+                assert!(
+                    s.live
+                        .get(ledger::Sleeve::Trade, pair)
+                        .is_some_and(|p| p.qty > 0.0),
+                    "{pair} must have an adopted basis after the move"
+                );
+            }
         }
         // CRITICAL: the ledger-scan baseline moves to NOW, so the next scan
         // never asks Kraken for deposits from before the move.

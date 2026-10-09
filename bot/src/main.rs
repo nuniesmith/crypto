@@ -1170,7 +1170,7 @@ async fn fetch_closed_daily(client: &KrakenRestClient, pair: &str) -> anyhow::Re
 
 async fn fetch_marks(client: &KrakenRestClient) -> anyhow::Result<Vec<(String, f64)>> {
     let mut out = Vec::new();
-    for pair in ["SOLUSD", "ETHUSD", "XBTUSD"] {
+    for pair in ["SOLUSD", "ETHUSD", "XBTUSD", "LINKUSD", "XRPUSD", "INJUSD"] {
         let t = client
             .get_ticker(pair)
             .await
@@ -1456,6 +1456,9 @@ mod work_tick_tests {
             btc: 85_000.0,
             eth: 2_700.0,
             sol: 120.0,
+            link: 14.0,
+            xrp: 1.5,
+            inj: 7.4,
         }
     }
 
@@ -1621,6 +1624,9 @@ mod work_tick_tests {
             btc: 85_000.0,
             eth: 0.0, // the outage
             sol: 120.0,
+            link: 14.0,
+            xrp: 1.5,
+            inj: 7.4,
         };
         let mut events = Vec::new();
         maybe_run_policy_migration(&mut s, &w, bad, 1_728_000_000, &mut events);

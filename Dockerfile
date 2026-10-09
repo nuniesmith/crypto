@@ -43,6 +43,11 @@ ENV CRYPTO_BOT_ROOT=/app
 # Persist state across container restarts/upgrades.
 VOLUME ["/app/data"]
 
+# WebUI: dashboard (/) + forecast (/forecast) + start/stop API.
+EXPOSE 8090
+
 ENTRYPOINT ["crypto-bot"]
-# Default: live loop. Override per deploy (e.g. "paper" for a dry run).
-CMD ["live", "--confirm", "I_UNDERSTAND_REAL_MONEY", "--loop"]
+# Default: WebUI, which manages the trading loop as a child process via the
+# dashboard's start/stop. Override per deploy (e.g. "live --confirm ..." for
+# loop-only without the web server).
+CMD ["webui", "--port", "8090"]

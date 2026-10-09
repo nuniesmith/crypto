@@ -70,17 +70,17 @@
 use std::collections::BTreeMap;
 
 /// BTC's share of the account total at the bull floor (regime exposure 1.0).
-pub const BASE_BTC: f64 = 0.50;
+pub const BASE_BTC: f64 = 0.44;
 /// ETH's share of the account total at the bull floor.
-pub const BASE_ETH: f64 = 0.25;
+pub const BASE_ETH: f64 = 0.22;
 /// SOL's share of the account total at the bull floor.
-pub const BASE_SOL: f64 = 0.15;
+pub const BASE_SOL: f64 = 0.12;
 /// LINK's share of the account total at the bull floor (2% satellite).
-pub const BASE_LINK: f64 = 0.02;
+pub const BASE_LINK: f64 = 0.05;
 /// XRP's share of the account total at the bull floor (2% satellite).
-pub const BASE_XRP: f64 = 0.02;
+pub const BASE_XRP: f64 = 0.05;
 /// INJ's share of the account total at the bull floor (2% satellite).
-pub const BASE_INJ: f64 = 0.02;
+pub const BASE_INJ: f64 = 0.05;
 // Cash has no constant of its own: it is always `1 - sum(effective coin
 // targets)`, which is how a flip that shrinks a coin's target grows cash
 // automatically rather than needing its own rule.
@@ -534,14 +534,14 @@ mod tests {
     }
 
     #[test]
-    fn effective_weights_sum_to_ninety_six_percent_in_an_all_bull_account() {
+    fn effective_weights_sum_to_ninety_three_percent_in_an_all_bull_account() {
         let sum = effective_weight("XBTUSD", true)
             + effective_weight("ETHUSD", true)
             + effective_weight("SOLUSD", true)
             + effective_weight("LINKUSD", true)
             + effective_weight("XRPUSD", true)
             + effective_weight("INJUSD", true);
-        assert!((sum - 0.96).abs() < 1e-9, "sum={sum}");
+        assert!((sum - 0.93).abs() < 1e-9, "sum={sum}");
         let mut bulls = BTreeMap::new();
         bulls.insert("XBTUSD".to_string(), true);
         bulls.insert("ETHUSD".to_string(), true);
@@ -549,16 +549,16 @@ mod tests {
         bulls.insert("LINKUSD".to_string(), true);
         bulls.insert("XRPUSD".to_string(), true);
         bulls.insert("INJUSD".to_string(), true);
-        assert!((cash_weight(&bulls).unwrap() - 0.04).abs() < 1e-9);
+        assert!((cash_weight(&bulls).unwrap() - 0.07).abs() < 1e-9);
     }
 
     #[test]
-    fn an_all_bear_account_wants_up_to_fifty_two_percent_cash() {
+    fn an_all_bear_account_wants_up_to_fifty_three_point_five_percent_cash() {
         let mut bears = BTreeMap::new();
         for p in crate::regime::PAIRS {
             bears.insert(p.to_string(), false);
         }
-        assert!((cash_weight(&bears).unwrap() - 0.52).abs() < 1e-9);
+        assert!((cash_weight(&bears).unwrap() - 0.535).abs() < 1e-9);
     }
 
     #[test]
@@ -593,7 +593,7 @@ mod tests {
     fn a_coin_already_at_its_bull_target_places_nothing() {
         let total = 1_000.0;
         let w = Wallet {
-            usd: total * 0.04,
+            usd: total * 0.07,
             btc: (total * BASE_BTC) / marks().btc,
             eth: (total * BASE_ETH) / marks().eth,
             sol: (total * BASE_SOL) / marks().sol,

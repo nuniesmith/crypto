@@ -373,16 +373,16 @@ mod tests {
         assert!(
             body.contains("**BTC**")
                 && body.contains("50.0%")
-                && body.contains("vs `50.0%` target (bull)"),
+                && body.contains("vs `44.0%` target (bull)"),
             "{body}"
         );
         assert!(
-            body.contains("**SOL**") && body.contains("vs `7.5%` target (bear)"),
+            body.contains("**SOL**") && body.contains("vs `6.0%` target (bear)"),
             "{body}"
         );
-        // Cash target with every pair read: 50+25+7.5+2+2+2 = 88.5 invested, 11.5 cash.
+        // Cash target with every pair read: 44+22+6+5+5+5 = 87 invested, 13 cash.
         assert!(
-            body.contains("**cash**") && body.contains("vs `11.5%` target"),
+            body.contains("**cash**") && body.contains("vs `13.0%` target"),
             "{body}"
         );
     }

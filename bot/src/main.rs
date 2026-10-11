@@ -74,7 +74,7 @@ Usage:
   crypto-bot paper              one cycle (paper bookkeeping only)
   crypto-bot paper --loop       repeat every 60s
   crypto-bot status             print account / books
-  crypto-bot report             send a Discord snapshot now (needs DISCORD_WEBHOOK_URL)
+  crypto-bot report             send a Discord snapshot now (needs CRYPTO_DISCORD_WEBHOOK_URL)
   crypto-bot live --dry-run     preview: real wallet read, no orders placed
   crypto-bot live --confirm I_UNDERSTAND_REAL_MONEY
                                 real Kraken post-only orders (KRAKEN_API_KEY/SECRET)
@@ -88,7 +88,7 @@ Usage:
                                 brings the account to its effective targets
 
 Default is paper. Live and rebalance refuse to run without the exact confirm
-string. Discord: set DISCORD_WEBHOOK_URL for daily (15:00 UTC), weekly (Mon),
+string. Discord: set CRYPTO_DISCORD_WEBHOOK_URL for daily (15:00 UTC), weekly (Mon),
 monthly (1st).
 
 Policy (alloc.rs): one account, target weights BTC 50% / ETH 25% / SOL 15% /
@@ -230,7 +230,7 @@ async fn report_cmd() -> anyhow::Result<()> {
     discord::maybe_report(&mut state, Some("startup"), account.as_ref()).await;
     save_state(&state)?;
     if discord::webhook_url().is_none() {
-        anyhow::bail!("set DISCORD_WEBHOOK_URL to an https://discord.com/api/webhooks/... URL");
+        anyhow::bail!("set CRYPTO_DISCORD_WEBHOOK_URL to an https://discord.com/api/webhooks/... URL");
     }
     Ok(())
 }

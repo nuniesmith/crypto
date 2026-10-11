@@ -13,7 +13,7 @@ use crate::paper::{fmt_ts, FlowKind, State};
 use crate::regime;
 
 pub fn webhook_url() -> Option<String> {
-    std::env::var("DISCORD_WEBHOOK_URL")
+    std::env::var("CRYPTO_DISCORD_WEBHOOK_URL")
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| s.starts_with("https://"))
@@ -21,7 +21,7 @@ pub fn webhook_url() -> Option<String> {
 
 pub async fn send_raw(content: &str) -> anyhow::Result<()> {
     let Some(url) = webhook_url() else {
-        anyhow::bail!("DISCORD_WEBHOOK_URL is not set");
+        anyhow::bail!("CRYPTO_DISCORD_WEBHOOK_URL is not set");
     };
     exchange_apiws::ensure_crypto_provider();
     let client = reqwest::Client::builder()

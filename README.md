@@ -138,7 +138,7 @@ the two and cannot honestly be restated as either.
 
 Loop wakes every 60s and **only acts on a new closed 1h bar**. Live path places Kraken **limit** orders, wallet-capped. Spot: no short opens. Fees in the paper-scale books: tier-3 maker 0.22% + 1 bp slip.
 
-Discord (`DISCORD_WEBHOOK_URL`): startup, daily ~15:00 UTC, weekly Monday, monthly 1st. Live reports fetch `POST /0/private/Balance` first, then the policy line, then the **live sleeve's real P&L**, and only then the simulation books.
+Discord (`CRYPTO_DISCORD_WEBHOOK_URL`): startup, daily ~15:00 UTC, weekly Monday, monthly 1st. Live reports fetch `POST /0/private/Balance` first, then the policy line, then the **live sleeve's real P&L**, and only then the simulation books.
 
 Not in the live bot: XRP, FET, TRUMP, memes, forex. See [docs/research.md](docs/research.md).
 
@@ -164,7 +164,7 @@ journalctl --user -u crypto-bot-live -f
 ```
 KRAKEN_API_KEY=...
 KRAKEN_API_SECRET=...
-DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
+CRYPTO_DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
 ```
 
 Live refuses to start without `--confirm I_UNDERSTAND_REAL_MONEY` (the launcher embeds that). Full runbook: [docs/live.md](docs/live.md).

@@ -569,6 +569,55 @@ pub fn save_state(state: &State) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Kraken balances as the trading loop last read them, for the WebUI.
+///
+/// The WebUI used to call Kraken's private `Balance` itself, from a second
+/// process holding the same API key as the trading loop. Kraken requires a
+/// key's nonces to keep rising, so whenever the two processes' requests
+/// crossed, Kraken refused one with `EAPI:Invalid nonce`: 8 times in two
+/// days, once on the loop's open-order check (2026-10-14), which then sized
+/// against cash an open order had already claimed. While the loop runs, the
+/// WebUI now reads this file and never calls the private API, leaving the
+/// loop the only process on the key.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BalanceSnapshot {
+    /// When the loop read these balances (Unix seconds).
+    pub ts: i64,
+    pub balances: Vec<(String, f64)>,
+}
+
+pub fn balances_path() -> PathBuf {
+    data_dir().join("balances.json")
+}
+
+/// Written the same way as the state: a temp file renamed into place, so a
+/// reader never sees half a file.
+pub fn save_balances(snapshot: &BalanceSnapshot) -> anyhow::Result<()> {
+    fs::create_dir_all(data_dir())?;
+    let tmp = balances_path().with_extension("json.tmp");
+    fs::write(&tmp, serde_json::to_string(snapshot)?)?;
+    fs::rename(tmp, balances_path())?;
+    Ok(())
+}
+
+pub fn load_balances() -> Option<BalanceSnapshot> {
+    let s = fs::read_to_string(balances_path()).ok()?;
+    serde_json::from_str(&s).ok()
+}
+
+/// The snapshot's balances, if it was taken at most `max_age_secs` before
+/// `now`. A timestamp in the future beyond a minute of clock skew is not
+/// trusted either.
+pub fn fresh_balances(
+    snapshot: Option<BalanceSnapshot>,
+    now: i64,
+    max_age_secs: i64,
+) -> Option<Vec<(String, f64)>> {
+    snapshot
+        .filter(|s| now - s.ts <= max_age_secs && s.ts - now <= 60)
+        .map(|s| s.balances)
+}
+
 pub fn append_journal(value: &serde_json::Value) -> anyhow::Result<()> {
     fs::create_dir_all(data_dir())?;
     use std::io::Write;
@@ -1156,5 +1205,47 @@ mod order_tests {
             s.policy_version < 2,
             "the one-time move has not run on this file yet"
         );
+    }
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+
+    fn snapshot(ts: i64) -> BalanceSnapshot {
+        BalanceSnapshot {
+            ts,
+            balances: vec![("ZUSD".into(), 16.1077), ("XXRP".into(), 9.14569769)],
+        }
+    }
+
+    #[test]
+    fn a_balance_snapshot_is_used_only_while_fresh() {
+        let now = 1_792_000_000;
+        assert_eq!(
+            fresh_balances(Some(snapshot(now - 60)), now, 180),
+            Some(snapshot(now).balances)
+        );
+        assert_eq!(
+            fresh_balances(Some(snapshot(now - 180)), now, 180),
+            Some(snapshot(now).balances)
+        );
+        assert_eq!(fresh_balances(Some(snapshot(now - 181)), now, 180), None);
+        assert_eq!(fresh_balances(None, now, 180), None);
+    }
+
+    #[test]
+    fn a_balance_snapshot_from_the_future_is_not_trusted() {
+        let now = 1_792_000_000;
+        assert!(fresh_balances(Some(snapshot(now + 30)), now, 180).is_some());
+        assert_eq!(fresh_balances(Some(snapshot(now + 61)), now, 180), None);
+    }
+
+    #[test]
+    fn a_balance_snapshot_round_trips_through_json() {
+        let s = snapshot(1_792_000_000);
+        let back: BalanceSnapshot =
+            serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back, s);
     }
 }

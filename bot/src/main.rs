@@ -27,6 +27,7 @@ mod features;
 mod kraken_src;
 mod ledger;
 mod live;
+mod minimums;
 mod paper;
 mod paper_ex;
 mod regime;
@@ -143,7 +144,9 @@ async fn main() -> anyhow::Result<()> {
                 .and_then(|w| w[1].parse::<u16>().ok())
                 .unwrap_or(8090);
             let autostart = args.iter().any(|a| a == "--autostart")
-                || std::env::var("CRYPTO_WEBUI_AUTOSTART").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
+                || std::env::var("CRYPTO_WEBUI_AUTOSTART")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
             webui::serve(port, autostart).await
         }
         "rebalance" => {
@@ -230,7 +233,9 @@ async fn report_cmd() -> anyhow::Result<()> {
     discord::maybe_report(&mut state, Some("startup"), account.as_ref()).await;
     save_state(&state)?;
     if discord::webhook_url().is_none() {
-        anyhow::bail!("set CRYPTO_DISCORD_WEBHOOK_URL to an https://discord.com/api/webhooks/... URL");
+        anyhow::bail!(
+            "set CRYPTO_DISCORD_WEBHOOK_URL to an https://discord.com/api/webhooks/... URL"
+        );
     }
     Ok(())
 }
@@ -295,11 +300,24 @@ async fn one_cycle(
     let read_gw = live_gw.or(owned_gw.as_ref());
 
     let mut wallet = match (matches!(mode, Mode::Live | Mode::LiveDry), read_gw) {
-        (true, Some(gw)) => gw
-            .balances()
-            .await
-            .ok()
-            .map(|b| alloc::Wallet::from_balances(&b)),
+        (true, Some(gw)) => match gw.balances().await {
+            Ok(b) => {
+                // The WebUI reads this rather than calling Kraken's private
+                // API itself (see `paper::BalanceSnapshot`). Live only: a dry
+                // run must not leave a file a live WebUI would trust.
+                if matches!(mode, Mode::Live) {
+                    let snapshot = paper::BalanceSnapshot {
+                        ts: now,
+                        balances: b.clone(),
+                    };
+                    if let Err(e) = paper::save_balances(&snapshot) {
+                        warn!("balance snapshot for the WebUI: {e:#}");
+                    }
+                }
+                Some(alloc::Wallet::from_balances(&b))
+            }
+            Err(_) => None,
+        },
         _ => None,
     };
     // Ask Kraken what its open orders have already claimed. Without this the
@@ -318,6 +336,18 @@ async fn one_cycle(
     let due_for_work = is_startup || state.last_work_hour != this_hour;
 
     if matches!(mode, Mode::Live | Mode::LiveDry) && due_for_work {
+        // Kraken's minimum order sizes, fresh for this tick's sizing. A
+        // public call (no nonce); on failure the table in force stands.
+        match minimums::refresh(client).await {
+            Ok(changes) => {
+                for change in changes {
+                    let msg = format!("Kraken minimum changed: {change}");
+                    warn!("{msg}");
+                    events.push(msg);
+                }
+            }
+            Err(e) => warn!("minimums: {e:#} — sizing with the table already in force"),
+        }
         match wallet.as_ref() {
             Some(w) => {
                 work_tick(
@@ -482,7 +512,7 @@ async fn maybe_convert_stables(
     events: &mut Vec<String>,
 ) {
     for (balance, pair) in [(w.usdc, "USDCUSD"), (w.usdt, "USDTUSD")] {
-        if balance < alloc::MIN_STABLE {
+        if balance < minimums::ordermin(pair) {
             continue;
         }
         if has_open_order(state, pair) {
@@ -1013,7 +1043,8 @@ fn maybe_clear_deposit_pending(
     if !state.deposit_pending || any_deposit_buy_this_tick {
         return;
     }
-    let stable_awaiting_conversion = w.usdc >= alloc::MIN_STABLE || w.usdt >= alloc::MIN_STABLE;
+    let stable_awaiting_conversion =
+        w.usdc >= minimums::ordermin("USDCUSD") || w.usdt >= minimums::ordermin("USDTUSD");
     let deposit_order_open = state.pending_orders.iter().any(|o| {
         o.book.as_deref().and_then(Purpose::parse).map(|(p, _)| p) == Some(Purpose::DepositBuy)
     });

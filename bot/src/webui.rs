@@ -5,8 +5,11 @@
 //! - start/stop controls for the trading loop (managed as a child process),
 //! - the forecast calculator.
 //!
-//! The dashboard reads `state.json` for regime flags and queries Kraken for
-//! live balances (best-effort: without keys it shows regime and targets only).
+//! The dashboard reads `state.json` for regime flags. Balances come from the
+//! trading loop's snapshot while the loop runs (`paper::BalanceSnapshot`), so
+//! the loop stays the only process calling Kraken's private API on the key;
+//! with no loop running, the dashboard asks Kraken itself (best-effort:
+//! without keys it shows regime and targets only).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -37,6 +40,10 @@ struct CachedHoldings {
 }
 
 const HOLDINGS_TTL: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// How old the trading loop's balance snapshot may be for the dashboard to
+/// show it. The loop writes one every minute.
+const SNAPSHOT_MAX_AGE_SECS: i64 = 180;
 
 #[derive(Serialize)]
 struct PairStatus {
@@ -76,12 +83,11 @@ fn is_cash(code: &str) -> bool {
 
 async fn bot_running(state: &Arc<WebState>) -> bool {
     let mut guard = state.bot_child.lock().await;
-    match guard.as_mut() {
-        Some(child) => match child.try_wait() {
+    if let Some(child) = guard.as_mut() {
+        match child.try_wait() {
             Ok(None) => return true, // still running (managed)
             _ => *guard = None,      // exited — drop the handle, fall through
-        },
-        None => {}
+        }
     }
     drop(guard);
     // Fall back to detecting an externally-managed loop (e.g. systemd) so the
@@ -101,36 +107,56 @@ fn external_bot_running() -> bool {
         }
         let cmdline = std::fs::read_to_string(format!("/proc/{pid}/cmdline")).unwrap_or_default();
         let parts: Vec<&str> = cmdline.split('\0').collect();
-        if parts.iter().any(|p| p.ends_with("crypto-bot")) && parts.iter().any(|p| *p == "live") {
+        if parts.iter().any(|p| p.ends_with("crypto-bot")) && parts.contains(&"live") {
             return true;
         }
     }
     false
 }
 
-async fn fetch_holdings() -> CachedHoldings {
+async fn fetch_holdings(loop_running: bool) -> CachedHoldings {
     let mut out = CachedHoldings::default();
-    if !live::keys_present() {
-        return out;
-    }
+    let balances = if loop_running {
+        // The loop is the only process on the key while it runs: a second
+        // private caller is what produced `EAPI:Invalid nonce`. No fresh
+        // snapshot means the loop is not reading balances either, and the
+        // dashboard says so (kraken_ok false) rather than asking Kraken
+        // itself.
+        match paper::fresh_balances(
+            paper::load_balances(),
+            chrono::Utc::now().timestamp(),
+            SNAPSHOT_MAX_AGE_SECS,
+        ) {
+            Some(b) => b,
+            None => {
+                warn!("webui: no fresh balance snapshot from the trading loop");
+                return out;
+            }
+        }
+    } else {
+        if !live::keys_present() {
+            return out;
+        }
+        let gw = match live::LiveKraken::from_env() {
+            Ok(g) => g,
+            Err(e) => {
+                warn!("webui: kraken gateway failed: {e:#}");
+                return out;
+            }
+        };
+        match gw.balances().await {
+            Ok(b) => b,
+            Err(e) => {
+                warn!("webui: kraken balances failed: {e:#}");
+                return out;
+            }
+        }
+    };
+    // Prices are public (no key, no nonce).
     let client = match KrakenRestClient::new() {
         Ok(c) => c,
         Err(e) => {
             warn!("webui: kraken client failed: {e}");
-            return out;
-        }
-    };
-    let gw = match live::LiveKraken::from_env() {
-        Ok(g) => g,
-        Err(e) => {
-            warn!("webui: kraken gateway failed: {e:#}");
-            return out;
-        }
-    };
-    let balances = match gw.balances().await {
-        Ok(b) => b,
-        Err(e) => {
-            warn!("webui: kraken balances failed: {e:#}");
             return out;
         }
     };
@@ -172,14 +198,16 @@ async fn api_status(State(state): State<Arc<WebState>>) -> Json<StatusResponse> 
     // Holdings from Kraken (best-effort, cached 2 min — Kraken rate-limits).
     let cached = {
         let guard = state.holdings_cache.lock().await;
-        guard.clone().filter(|(at, _)| at.elapsed() < HOLDINGS_TTL).map(|(_, c)| c)
+        guard
+            .clone()
+            .filter(|(at, _)| at.elapsed() < HOLDINGS_TTL)
+            .map(|(_, c)| c)
     };
     let holdings = match cached {
         Some(c) => c,
         None => {
-            let fresh = fetch_holdings().await;
-            *state.holdings_cache.lock().await =
-                Some((std::time::Instant::now(), fresh.clone()));
+            let fresh = fetch_holdings(running).await;
+            *state.holdings_cache.lock().await = Some((std::time::Instant::now(), fresh.clone()));
             fresh
         }
     };
@@ -193,7 +221,10 @@ async fn api_status(State(state): State<Arc<WebState>>) -> Json<StatusResponse> 
         .iter()
         .map(|pair| {
             let bull = regime_bull.get(*pair).copied();
-            let target_pct = bull.map(|b| alloc::effective_weight(pair, b)).unwrap_or(0.0) * 100.0;
+            let target_pct = bull
+                .map(|b| alloc::effective_weight(pair, b))
+                .unwrap_or(0.0)
+                * 100.0;
             let holding_usd = holdings_usd.get(*pair).copied().unwrap_or(0.0);
             let holding_pct = if total_usd > 0.0 {
                 holding_usd / total_usd * 100.0
@@ -283,7 +314,9 @@ pub async fn serve(port: u16, autostart: bool) -> anyhow::Result<()> {
     });
     if autostart && !bot_running(&state).await {
         info!("webui: autostart enabled — launching trading loop");
-        start_bot(&state).await;
+        if let Err(e) = start_bot(&state).await {
+            tracing::error!("webui: autostart could not launch the trading loop, so this container is NOT trading: {e}");
+        }
     }
     let app = axum::Router::new()
         .route("/", get(dashboard))

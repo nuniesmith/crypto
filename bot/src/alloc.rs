@@ -85,16 +85,19 @@ pub const BASE_INJ: f64 = 0.05;
 // targets)`, which is how a flip that shrinks a coin's target grows cash
 // automatically rather than needing its own rule.
 
-/// Kraken `costmin` for every USD pair this bot trades (verified against
-/// `/0/public/AssetPairs`, 2026-09-21; unchanged by this policy).
+// Kraken's minimum order sizes. Sizing reads them through `minimums`, which
+// keeps them current from Kraken's public AssetPairs; these constants are
+// only its FALLBACK, for before the first read or a pair Kraken did not
+// answer for. Kraken moves its minimums with price, which is how three of
+// these went stale before 2026-10-15 (XRP was 1.65 here, 4 at Kraken).
+/// Kraken `costmin` for every USD pair this bot trades (AssetPairs, 2026-10-15).
 pub const COST_MIN_USD: f64 = 0.50;
-/// Kraken `ordermin`s, same source. XBT 0.00005 / ETH 0.001 / SOL 0.06.
-pub const MIN_BTC: f64 = 0.00005;
-pub const MIN_ETH: f64 = 0.001;
-pub const MIN_SOL: f64 = 0.06;
-/// Kraken ordermins for the satellites (verified 2026-10-08).
-pub const MIN_LINK: f64 = 0.55;
-pub const MIN_XRP: f64 = 1.65;
+/// Kraken `ordermin`s, same source and date.
+pub const MIN_BTC: f64 = 0.00006;
+pub const MIN_ETH: f64 = 0.002;
+pub const MIN_SOL: f64 = 0.05;
+pub const MIN_LINK: f64 = 0.35;
+pub const MIN_XRP: f64 = 4.0;
 pub const MIN_INJ: f64 = 0.7;
 /// Kraken `ordermin` for the USDC/USDT-USD pairs, in units of the stablecoin.
 pub const MIN_STABLE: f64 = 5.0;
@@ -195,16 +198,11 @@ impl Wallet {
         }
     }
 
+    /// Kraken's minimum order size for `pair`, live from `minimums`
+    /// (falling back to this module's constants); `f64::MAX` for a pair
+    /// this policy does not trade.
     pub fn min_qty(pair: &str) -> f64 {
-        match pair {
-            "XBTUSD" => MIN_BTC,
-            "ETHUSD" => MIN_ETH,
-            "SOLUSD" => MIN_SOL,
-            "LINKUSD" => MIN_LINK,
-            "XRPUSD" => MIN_XRP,
-            "INJUSD" => MIN_INJ,
-            _ => f64::MAX,
-        }
+        crate::minimums::ordermin(pair)
     }
 
     /// This pair's share of the account total at the bull floor; 0.0 for
@@ -258,8 +256,12 @@ impl Marks {
     /// target down and could trade real coins on a bad number — so callers
     /// must refuse to size anything rather than proceed with a partial view.
     pub fn complete(&self) -> bool {
-        self.btc > 0.0 && self.eth > 0.0 && self.sol > 0.0
-            && self.link > 0.0 && self.xrp > 0.0 && self.inj > 0.0
+        self.btc > 0.0
+            && self.eth > 0.0
+            && self.sol > 0.0
+            && self.link > 0.0
+            && self.xrp > 0.0
+            && self.inj > 0.0
     }
 
     /// The price of one traded pair, 0.0 for one this struct does not mark.
@@ -409,17 +411,18 @@ pub fn gap_step(
     let have_usd = w.coin(pair) * m.of(pair);
     let delta = target - have_usd;
     let min_q = Wallet::min_qty(pair);
+    let min_cost = crate::minimums::costmin(pair);
     if delta > 0.0 {
         let price = touch.bid;
         let spend = delta.min(spendable.max(0.0) * FEE_RESERVE);
         let q = floor_qty(spend / price);
-        if q < min_q || spend < COST_MIN_USD {
+        if q < min_q || spend < min_cost {
             // Distinguish "already there" (the UNCAPPED gap is itself below
             // a minimum order — nothing could ever fill it) from "can't
             // afford it right now" (capped by cash) — only the second is
             // worth retrying on a later tick.
             let wanted = floor_qty(delta / price);
-            return if wanted < min_q || delta < COST_MIN_USD {
+            return if wanted < min_q || delta < min_cost {
                 GapStep::AtTarget
             } else {
                 GapStep::NotYet
@@ -435,7 +438,7 @@ pub fn gap_step(
     let price = touch.ask;
     let have = w.coin(pair);
     let q = floor_qty(((-delta) / price).min(have));
-    if q < min_q || q * price < COST_MIN_USD {
+    if q < min_q || q * price < min_cost {
         return GapStep::AtTarget;
     }
     GapStep::Order(Rebalance {
@@ -455,11 +458,12 @@ pub fn gap_step(
 /// Kraken's precision) — there is no target to leave any of it at, unlike a
 /// traded coin.
 pub fn stable_sell(balance: f64, pair: &'static str, touch: Touch) -> Option<Rebalance> {
-    if !touch.complete() || !balance.is_finite() || balance < MIN_STABLE {
+    let min_q = crate::minimums::ordermin(pair);
+    if !touch.complete() || !balance.is_finite() || balance < min_q {
         return None;
     }
     let q = floor_qty(balance);
-    if q < MIN_STABLE || q * touch.bid < COST_MIN_USD {
+    if q < min_q || q * touch.bid < crate::minimums::costmin(pair) {
         return None;
     }
     Some(Rebalance {
@@ -693,6 +697,37 @@ mod tests {
             }
             other => panic!("expected a sell, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_gap_below_krakens_xrp_minimum_is_at_target_not_an_order() {
+        // The live account on 2026-10-15: XRP 3.7% of $333 against its 5%
+        // target, a gap of ~3.4 XRP. Kraken's minimum is 4 XRP, so no order
+        // can close it. With the old 1.65 minimum this sized a 3.3 XRP buy
+        // that Kraken refused every hour, and the deposit never finished.
+        let m = Marks {
+            btc: 81_576.4,
+            eth: 2_418.61,
+            sol: 104.17,
+            link: 12.42,
+            xrp: 1.3299,
+            inj: 7.658,
+        };
+        let w = Wallet {
+            usd: 16.1077,
+            btc: 0.0020026,
+            eth: 0.0301383,
+            sol: 0.3803066,
+            link: 1.00135073,
+            xrp: 9.14569769,
+            inj: 1.84641187,
+            ..Wallet::default()
+        };
+        let t = touch(1.3298, 1.3300);
+        assert!(matches!(
+            gap_step(&w, m, t, "XRPUSD", true, w.usd_available()),
+            GapStep::AtTarget
+        ));
     }
 
     #[test]

@@ -244,10 +244,7 @@ fn deposits_value(state: &State, kind: &str) -> String {
     }
     let mut lines = Vec::new();
     for d in &deposits {
-        lines.push(format!(
-            "{} {:.8} (${:.2})",
-            d.asset, d.amount, d.usd_value
-        ));
+        lines.push(format!("{} {:.8} (${:.2})", d.asset, d.amount, d.usd_value));
     }
     let total: f64 = deposits.iter().map(|d| d.usd_value).sum();
     lines.push(format!(
@@ -444,8 +441,14 @@ mod tests {
                 ("XETH", 2_500.0 / 2_700.0),
                 ("SOL", 750.0 / 120.0),
             ],
-            &[("XBTUSD", 85_000.0), ("ETHUSD", 2_700.0), ("SOLUSD", 120.0),
-              ("LINKUSD", 14.0), ("XRPUSD", 1.5), ("INJUSD", 7.4)],
+            &[
+                ("XBTUSD", 85_000.0),
+                ("ETHUSD", 2_700.0),
+                ("SOLUSD", 120.0),
+                ("LINKUSD", 14.0),
+                ("XRPUSD", 1.5),
+                ("INJUSD", 7.4),
+            ],
         );
         let body = rendered("daily", &s, Some(&acct));
         assert!(body.contains("$10,000.00"), "{body}");
@@ -484,7 +487,10 @@ mod tests {
         assert!(body.contains("ETHUSD") && body.contains("BULL"), "{body}");
         assert!(body.contains("+5.0%"), "{body}");
         assert!(body.contains("2,565.00"), "{body}");
-        assert!(body.contains("SOLUSD") && body.contains("not read yet"), "{body}");
+        assert!(
+            body.contains("SOLUSD") && body.contains("not read yet"),
+            "{body}"
+        );
     }
 
     #[test]
@@ -517,10 +523,7 @@ mod tests {
             body.contains("investing a deposit into whatever it makes underweight"),
             "{body}"
         );
-        assert!(
-            body.contains("sell 0.01000000 ETHUSD"),
-            "{body}"
-        );
+        assert!(body.contains("sell 0.01000000 ETHUSD"), "{body}");
     }
 
     #[test]
@@ -556,9 +559,12 @@ mod tests {
         s.net_deposits_usd = 150.0;
         let acct = account(&[("ZUSD", 1_000.0)], &[]);
         let body = rendered("daily", &s, Some(&acct));
-        assert!(body.contains("LNEW"), "{body}");
+        // The embed lists a deposit by asset and amount (it stopped printing
+        // Kraken refids when the reports became embeds, 2026-10-10).
+        assert!(body.contains("USD 100.00000000 ($100.00)"), "{body}");
+        assert!(body.contains("period total $100.00"), "{body}");
         assert!(
-            !body.contains("LOLD"),
+            !body.contains("50.00000000"),
             "a deposit from 30 days ago is not in TODAY's period: {body}"
         );
         assert!(body.contains("net to date $150.00"), "{body}");
@@ -567,10 +573,21 @@ mod tests {
     #[test]
     fn a_withdrawal_never_appears_in_the_deposits_block() {
         let mut s = live_state();
+        // The withdrawal this test is about; the embed rewrite (2026-10-10)
+        // dropped it, leaving the test passing on an empty flow list.
+        s.flows.push(FlowRecord {
+            refid: "LWD".into(),
+            ts: Utc::now().timestamp(),
+            kind: FlowKind::Withdrawal,
+            asset: "USD".into(),
+            amount: -20.0,
+            usd_value: 20.0,
+        });
         let acct = account(&[("ZUSD", 1_000.0)], &[]);
         let body = rendered("daily", &s, Some(&acct));
         assert!(body.contains("Deposits"), "{body}");
         assert!(body.contains("none"), "{body}");
+        assert!(!body.contains("20.00000000"), "{body}");
     }
 
     #[test]

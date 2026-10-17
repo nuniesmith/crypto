@@ -42,6 +42,29 @@ pub async fn send_embed(embed: &serde_json::Value) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The red the reports already use for an all-bear wallet.
+const ALERT_RED: u32 = 0xED4245;
+
+/// A short red message for something a human has to look at: the trading
+/// loop died, or the account traded without this bot. Never fails the
+/// caller; an alert that cannot be delivered is logged and the work goes on.
+pub async fn alert(title: &str, description: &str) {
+    if webhook_url().is_none() {
+        warn!("discord alert not sent (no webhook): {title}");
+        return;
+    }
+    let embed = serde_json::json!({
+        "title": title,
+        "description": description,
+        "color": ALERT_RED,
+        "timestamp": Utc::now().to_rfc3339(),
+    });
+    match send_embed(&embed).await {
+        Ok(()) => info!("discord alert sent: {title}"),
+        Err(e) => warn!("discord alert failed ({title}): {e:#}"),
+    }
+}
+
 /// 1234567.89 -> "1,234,567.89".
 fn fmt_money(v: f64) -> String {
     let neg = v < 0.0;

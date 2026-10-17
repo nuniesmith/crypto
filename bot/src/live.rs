@@ -318,6 +318,21 @@ impl LiveKraken {
             .collect())
     }
 
+    /// The same page of closed orders, read for the foreign-trade watch
+    /// (`foreign.rs`): every order on it, the bot's own or not.
+    pub async fn closed_orders(&self) -> anyhow::Result<Vec<crate::foreign::ClosedOrder>> {
+        let closed = self
+            .client
+            .get_closed_orders()
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        Ok(closed
+            .closed
+            .iter()
+            .map(|(txid, o)| crate::foreign::ClosedOrder::from_kraken(txid, o))
+            .collect())
+    }
+
     /// Cancel one order we placed. A txid Kraken no longer knows about
     /// (already filled, already cancelled) comes back as an error, which is
     /// not a failure for our purposes — the caller drops it either way.

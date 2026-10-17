@@ -204,6 +204,10 @@ pub struct State {
     /// once per day regardless of how often the tick loop wakes.
     #[serde(default)]
     pub last_history_day: String,
+    /// Executed orders on the account that this bot did not place
+    /// (`foreign.rs`): when the watch began and what it has alerted on.
+    #[serde(default)]
+    pub foreign_watch: crate::foreign::ForeignWatch,
     /// UTC hour (`%Y-%m-%dT%H`) the work tick last ran. Replaces the 1h-bar
     /// trigger: order SETTLEMENT still runs every wake (see `main.rs`), but
     /// deciding what to trade runs once per UTC hour and once on startup.
@@ -317,6 +321,7 @@ impl State {
             history: Vec::new(),
             last_history_day: String::new(),
             last_work_hour: String::new(),
+            foreign_watch: Default::default(),
         }
     }
 }

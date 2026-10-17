@@ -1,0 +1,11 @@
+[package]
+name = "regime-replay"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Replay indicators-ta's regime detectors (the ones Janus serves) over daily candles"
+
+[dependencies]
+indicators-ta = "0.3"
+
+[workspace]

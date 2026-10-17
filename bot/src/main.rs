@@ -13,6 +13,7 @@
 //! $1,000 paper books) is left on disk as history: nothing here steps it or
 //! places an order from it any more.
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::time::Duration;
 
@@ -24,6 +25,7 @@ mod alloc;
 mod brains;
 mod discord;
 mod features;
+mod foreign;
 mod kraken_src;
 mod ledger;
 mod live;
@@ -417,7 +419,60 @@ async fn work_tick(
     maybe_scan_ledgers(state, mode, live_gw, m, now, events).await;
     maybe_read_regime(state, client, events).await;
     maybe_close_gaps(state, mode, live_gw, client, w, m, policy, now, events).await;
+    maybe_watch_foreign_trades(state, mode, live_gw, now, events).await;
     maybe_append_history(state, w, m, events);
+}
+
+/// Once a work tick, alert on executed orders this bot did not place
+/// (`foreign.rs`): a second trader on the key, or the operator by hand.
+///
+/// Runs after `maybe_close_gaps`, so an order placed this tick is already in
+/// `pending_orders`, and the settle step at the top of every cycle has moved
+/// filled ones into the ledger's fills: the bot's own orders are always in
+/// one of the two.
+async fn maybe_watch_foreign_trades(
+    state: &mut paper::State,
+    mode: Mode,
+    live_gw: Option<&live::LiveKraken>,
+    now: i64,
+    events: &mut Vec<String>,
+) {
+    if !matches!(mode, Mode::Live) {
+        return;
+    }
+    let Some(gw) = live_gw else { return };
+    let closed = match gw.closed_orders().await {
+        Ok(c) => c,
+        Err(e) => {
+            warn!("foreign-trade watch: closed orders unreadable ({e:#}); checking next tick");
+            return;
+        }
+    };
+    let starting = state.foreign_watch.since <= 0.0;
+    let own: HashSet<&str> = state
+        .pending_orders
+        .iter()
+        .map(|o| o.txid.as_str())
+        .chain(state.live.fills.iter().map(|f| f.txid.as_str()))
+        .collect();
+    let found = state.foreign_watch.check(&closed, &own, now as f64);
+    if starting {
+        info!("foreign-trade watch started: orders opened from now on are checked");
+    }
+    for o in found {
+        let line = o.describe();
+        warn!("FOREIGN TRADE {line}");
+        events.push(format!("FOREIGN TRADE {line}"));
+        discord::alert(
+            "Kraken trade this bot did not place",
+            &format!(
+                "{line}\n\nIf you placed it yourself, ignore this. Otherwise something else \
+                 is trading this account: look for a second copy of the bot, or rotate the \
+                 API key."
+            ),
+        )
+        .await;
+    }
 }
 
 /// The one-time move described in `alloc.rs`'s module docs: once per

@@ -55,3 +55,24 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # A merge reaches the live bot on its own. Oryx's compose pulls
+      # :latest, but only when oryx's own deploy runs, so a new image used to
+      # sit unused until someone ran it by hand. This starts that deploy
+      # (nuniesmith/oryx ci-cd.yml), which pulls :latest and recreates
+      # crypto-bot-live. Runs after the push above, so :latest is this commit.
+      #
+      # ORYX_DEPLOY_TOKEN is a fine-grained PAT with Actions: write on
+      # nuniesmith/oryx; GITHUB_TOKEN cannot start a workflow in another
+      # repository. A missing token FAILS this job rather than skipping it: a
+      # silent skip is a deploy that never happened, reported as green.
+      - name: Roll the new image out on oryx
+        env:
+          GH_TOKEN: ${{ secrets.ORYX_DEPLOY_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::ORYX_DEPLOY_TOKEN is not set, so oryx keeps running the previous image"
+            exit 1
+          fi
+          gh workflow run ci-cd.yml --repo nuniesmith/oryx
+          echo "Requested: ${{ github.server_url }}/nuniesmith/oryx/actions/workflows/ci-cd.yml"

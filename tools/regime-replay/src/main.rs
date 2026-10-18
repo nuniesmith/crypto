@@ -4,8 +4,8 @@
 //! detector stack: indicator-based (ADX, Bollinger, ATR, EMA), a hidden
 //! Markov model, and an ensemble of the two. Live, Janus feeds it minute
 //! klines. This feeds it DAILY candles instead, the timescale the crypto
-//! bot's 200-day rule works on, so basket.py can test whether it would have
-//! managed the account better.
+//! bot's 200-day rule works on, so basket.py (tag `python-research-final`) could
+//! test whether it would have managed the account better.
 //!
 //! stdin:  CSV `date,high,low,close` (header line, oldest first)
 //! stdout: CSV `date,ensemble,ensemble_conf,indicator,indicator_conf,hmm,hmm_conf`

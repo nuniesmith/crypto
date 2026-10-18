@@ -1,5 +1,8 @@
 # Long-term basket study (2026-10-16)
 
+> The Python this cites (`src/crypto/`) left `main` on 2026-10-17 and runs unchanged from the tag
+> `python-research-final`: see [research-code.md](research-code.md).
+
 Research only; the bot is untouched. Question: how does the live policy (v3: BTC 44 / ETH 22 / SOL 12 /
 LINK, XRP, INJ 5 each, the daily 200-day ±5% trend rule, trades only on flips and deposits) do with a
 weekly deposit, and should any coins be added?

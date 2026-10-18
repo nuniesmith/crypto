@@ -1,5 +1,8 @@
 # Janus, the crates and trending coins (2026-10-17)
 
+> The Python this cites (`src/crypto/`) left `main` on 2026-10-17 and runs unchanged from the tag
+> `python-research-final`: see [research-code.md](research-code.md).
+
 Research only; the bot is untouched. Three questions:
 
 1. Should Janus manage the basket, perhaps with new longer-term detectors? Or should the long-term rule

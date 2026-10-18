@@ -15,20 +15,30 @@ python3 -m venv .venv && .venv/bin/pip install -e .
 Use a fresh clone, not the live checkout (`~/github/crypto`): never switch
 branches there.
 
-## The forward test (still running)
+## The forward test (now in Rust)
 
 `crypto.opt.forward` froze the basket study's portfolios on 2026-10-16 and
-scores them only on Kraken daily candles from that day on, so it is the one
-piece of this code with a future. A tag suits it: the module says nothing in it
-may be tuned after the fact, and a tagged commit cannot be edited. It needs no
-key (Kraken's public OHLC, no nonce) and reads the live state read-only:
+scores them only on Kraken daily candles from that day on. Since 2026-10-18 the
+bot runs it itself (`bot/src/forward.rs`), with the regime decided by its own
+`regime::evaluate`, and posts it after every monthly report:
+
+```bash
+docker exec crypto-bot-live crypto-bot forward --actual
+```
+
+It reads public candles and the state file only, so it is safe beside the
+trading loop. Its tests replay Kraken candles captured on 2026-10-18
+(`bot/tests/fixtures/forward_kraken_2026-10-18.json`) and must land on the
+numbers this Python computed from the same candles: every day's regime for all
+six coins, and 16 runs to within 1e-9. The Python stays the reference; its
+recipe still works from the tag:
 
 ```bash
 .venv/bin/python -m crypto.opt.forward --actual /home/actions/oryx/data/crypto-bot/paper/state.json
 ```
 
-Kraken returns the last 720 daily candles, so it can score about 18 months of
-forward data before it needs another source.
+Kraken returns the last 720 daily candles, so the test can score about 18
+months of forward data before it needs another source.
 
 ## What each part was
 

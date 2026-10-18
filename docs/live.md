@@ -32,6 +32,7 @@ happened. A restart sends a Discord startup snapshot and flattens nothing.
 curl -s http://127.0.0.1:8090/api/status | jq .          # or the web UI: crypto.7gram.xyz / oryx:8090
 docker logs --tail 50 crypto-bot-live
 docker inspect -f '{{.State.Health.Status}}' crypto-bot-live
+docker exec crypto-bot-live crypto-bot forward --actual   # the forward test: public candles only
 ```
 
 **Not** `crypto-bot status`, `report` or `live --dry-run` while the loop

@@ -1,309 +1,322 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="color-scheme" content="light dark" />
-  <link rel="icon" href="data:," />
-  <title>Crypto Forecast Calculator</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500;600&family=Libre+Franklin:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <style>
-    :root {
-      color-scheme: light dark;
-      --page: #f3f5f2; --panel: #ffffff; --panel-soft: #e9eeeb; --ink: #16201d; --muted: #5e6a65;
-      --line: #d8dfdb; --line-strong: #bbc7c1; --accent: #f26a2e; --accent-soft: #ffe1d2;
-      --green: #17745c; --green-soft: #dcefe8; --blue: #3979a9; --track: #dfe5e1;
-      --shadow: 0 18px 50px rgba(20, 34, 29, .07);
-    }
-    @media (prefers-color-scheme: dark) {
-      :root {
-        --page: #111614; --panel: #19201d; --panel-soft: #222b27; --ink: #f2f6f3; --muted: #aab7b1;
-        --line: #303c36; --line-strong: #506159; --accent: #ff8148; --accent-soft: #472619;
-        --green: #65c9a7; --green-soft: #193b31; --blue: #76b6e4; --track: #2d3934;
-        --shadow: 0 18px 50px rgba(0, 0, 0, .25);
-      }
-    }
-    * { box-sizing: border-box; }
-    html { min-width: 320px; }
-    body { margin: 0; min-height: 100vh; background: var(--page); color: var(--ink); font-family: "Libre Franklin", sans-serif; font-size: 16px; line-height: 1.5; }
-    button, input { font: inherit; }
-    button { color: inherit; }
-    main { width: min(1180px, calc(100% - 40px)); margin: 0 auto; padding: 52px 0 72px; }
-    .intro { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(280px, .75fr); gap: 36px; align-items: end; margin-bottom: 30px; }
-    h1 { max-width: 760px; margin: 0; font-size: clamp(2.2rem, 5.2vw, 4.8rem); line-height: .98; letter-spacing: -.055em; font-weight: 700; }
-    .intro p { margin: 0 0 5px; color: var(--muted); font-size: 1rem; line-height: 1.65; }
-    .workspace { display: grid; grid-template-columns: minmax(300px, 370px) minmax(0, 1fr); gap: 22px; align-items: start; }
-    .panel { background: var(--panel); border: 1px solid var(--line); box-shadow: var(--shadow); }
-    .controls { border-radius: 12px 30px 12px 12px; padding: 26px; position: sticky; top: 18px; }
-    .section-title { margin: 0 0 22px; font-size: 1.05rem; letter-spacing: -.015em; }
-    .field { margin-bottom: 23px; }
-    .field-top { display: flex; justify-content: space-between; align-items: baseline; gap: 14px; margin-bottom: 9px; }
-    label { font-weight: 600; font-size: .91rem; }
-    .hint { color: var(--muted); font-size: .78rem; }
-    .money-input, .percent-input { position: relative; display: flex; align-items: center; }
-    .money-input span, .percent-input span { position: absolute; color: var(--muted); font-family: "IBM Plex Mono", monospace; pointer-events: none; }
-    .money-input span { left: 15px; }
-    .percent-input span { right: 15px; }
-    input[type="number"] { width: 100%; height: 48px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--page); color: var(--ink); padding: 0 15px 0 36px; font-family: "IBM Plex Mono", monospace; font-weight: 600; outline: none; transition: border-color .2s, box-shadow .2s; }
-    .percent-input input { padding-left: 15px; padding-right: 38px; }
-    input[type="number"]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent); }
-    input[type="range"] { width: 100%; height: 26px; margin: 8px 0 0; accent-color: var(--accent); cursor: pointer; }
-    .range-labels { display: flex; justify-content: space-between; color: var(--muted); font-family: "IBM Plex Mono", monospace; font-size: .7rem; }
-    .topnav { display: flex; gap: 8px; margin-bottom: 26px; }
-    .topnav a { color: var(--ink); text-decoration: none; font-size: .85rem; font-weight: 600; padding: 8px 18px; border-radius: 999px; border: 1px solid var(--line-strong); }
-    .topnav a.on { border-color: var(--accent); color: var(--accent); }
-    .presets { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-top: 10px; }
-    .preset { border: 1px solid var(--line); background: var(--panel-soft); border-radius: 999px; padding: 7px 5px; font-family: "IBM Plex Mono", monospace; font-size: .72rem; cursor: pointer; }
-    .preset:hover, .preset:focus-visible { border-color: var(--accent); outline: none; }
-    .preset.active { background: var(--accent); border-color: var(--accent); color: #18100c; }
-    .reset { width: 100%; border: 0; border-top: 1px solid var(--line); margin-top: 2px; padding: 17px 0 0; background: transparent; color: var(--muted); font-size: .82rem; cursor: pointer; text-align: left; }
-    .reset:hover { color: var(--ink); }
-    .results { min-width: 0; }
-    .outlook { border-radius: 30px 12px 12px 12px; padding: 30px; overflow: hidden; position: relative; }
-    .outlook:after { content: ""; position: absolute; width: 150px; height: 150px; right: -70px; top: -70px; border: 24px solid var(--accent-soft); border-radius: 50%; pointer-events: none; }
-    .outlook-header { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; position: relative; z-index: 1; }
-    .kicker { margin: 0 0 5px; color: var(--muted); font-size: .78rem; font-weight: 600; }
-    .hero-number { margin: 0; font-family: "IBM Plex Mono", monospace; font-size: clamp(2rem, 5vw, 3.5rem); letter-spacing: -.055em; line-height: 1.1; }
-    .gain-pill { flex: 0 0 auto; background: var(--green-soft); color: var(--green); border-radius: 999px; padding: 8px 12px; font-family: "IBM Plex Mono", monospace; font-size: .78rem; font-weight: 600; }
-    .summary-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); margin-top: 28px; border-radius: 10px; overflow: hidden; }
-    .summary-item { background: var(--panel-soft); padding: 15px; }
-    .summary-item span { display: block; color: var(--muted); font-size: .72rem; margin-bottom: 4px; }
-    .summary-item strong { font-family: "IBM Plex Mono", monospace; font-size: .92rem; }
-    .chart-wrap { margin-top: 22px; border: 1px solid var(--line); border-radius: 12px; padding: 22px 22px 13px; background: var(--panel); }
-    .chart-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 8px; }
-    .chart-head h2 { margin: 0; font-size: 1rem; }
-    .legend { display: flex; flex-wrap: wrap; gap: 12px; color: var(--muted); font-size: .72rem; }
-    .legend span { display: inline-flex; align-items: center; gap: 5px; }
-    .dot { width: 8px; height: 8px; border-radius: 2px; background: var(--blue); }
-    .dot.growth { background: var(--accent); }
-    #forecast-chart { display: block; width: 100%; height: 285px; overflow: visible; }
-    .chart-note { margin: 4px 0 0; color: var(--muted); font-size: .72rem; }
-    .milestones { margin-top: 22px; border-radius: 12px; overflow: hidden; }
-    .milestones h2 { margin: 0; padding: 22px 24px 12px; font-size: 1rem; }
-    .table-head, .milestone-row { display: grid; grid-template-columns: 1.05fr 1.35fr 1.15fr 1.15fr; gap: 16px; align-items: center; }
-    .table-head { padding: 8px 24px; color: var(--muted); font-size: .7rem; border-bottom: 1px solid var(--line); }
-    .milestone-row { padding: 15px 24px; border-bottom: 1px solid var(--line); }
-    .milestone-row:last-child { border-bottom: 0; }
-    .when { font-weight: 600; }
-    .amount, .contributed, .growth-value { font-family: "IBM Plex Mono", monospace; font-size: .84rem; text-align: right; }
-    .amount { color: var(--ink); font-weight: 600; }
-    .growth-value { color: var(--green); }
-    .strategy { margin-top: 22px; border: 1px solid var(--line); padding: 24px; border-radius: 12px 12px 26px 12px; }
-    .strategy-head { display: flex; justify-content: space-between; gap: 18px; align-items: start; margin-bottom: 16px; }
-    .strategy h2 { margin: 0 0 4px; font-size: 1rem; }
-    .strategy p { margin: 0; color: var(--muted); font-size: .8rem; }
-    .allocation-bar { display: flex; height: 12px; overflow: hidden; border-radius: 3px; background: var(--track); }
-    .allocation-bar span { display: block; height: 100%; }
-    .alloc-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 10px; margin-top: 12px; }
-    .alloc-grid span { color: var(--muted); font-size: .68rem; }
-    .alloc-grid strong { display: block; color: var(--ink); font-family: "IBM Plex Mono", monospace; font-size: .75rem; }
-    .fineprint { max-width: 820px; margin: 26px auto 0; color: var(--muted); text-align: center; font-size: .73rem; line-height: 1.6; }
-    @media (max-width: 900px) {
-      main { padding-top: 34px; }
-      .intro { grid-template-columns: 1fr; gap: 15px; }
-      .intro p { max-width: 650px; }
-      .workspace { grid-template-columns: 1fr; }
-      .controls { position: static; border-radius: 12px 26px 12px 12px; }
-      .outlook { border-radius: 26px 12px 12px 12px; }
-    }
-    @media (max-width: 620px) {
-      main { width: min(100% - 24px, 1180px); padding: 28px 0 48px; }
-      h1 { font-size: 2.55rem; }
-      .controls, .outlook { padding: 21px; }
-      .outlook-header { display: block; }
-      .gain-pill { display: inline-block; margin-top: 12px; }
-      .summary-grid { grid-template-columns: 1fr; }
-      .summary-item { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
-      .summary-item span { margin: 0; }
-      .chart-wrap { padding: 18px 10px 10px; }
-      .chart-head { align-items: flex-start; padding: 0 8px; }
-      #forecast-chart { height: 250px; }
-      .table-head { display: none; }
-      .milestones h2 { padding: 20px 20px 8px; }
-      .milestone-row { grid-template-columns: 1fr 1fr; gap: 7px 12px; padding: 15px 20px; }
-      .when { grid-row: 1 / span 2; align-self: start; }
-      .amount, .contributed, .growth-value { text-align: right; }
-      .contributed:before { content: "Added  "; color: var(--muted); font-family: "Libre Franklin", sans-serif; font-size: .68rem; }
-      .growth-value:before { content: "Growth  "; color: var(--muted); font-family: "Libre Franklin", sans-serif; font-size: .68rem; }
-      .amount { font-size: .95rem; }
-      .alloc-grid { grid-template-columns: repeat(4, 1fr); }
-      .strategy-head { display: block; }
-    }
-    @media (max-width: 390px) {
-      .presets { grid-template-columns: repeat(2, 1fr); }
-      .chart-head { display: block; }
-      .legend { margin-top: 8px; }
-    }
-    @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; transition: none !important; } }
-  </style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Crypto Forecast</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/app.css">
+<style>
+  .fc { display: grid; grid-template-columns: 320px minmax(0, 1fr); gap: 16px; align-items: start; }
+  .controls { position: sticky; top: 16px; }
+  @media (max-width: 760px) { .fc { grid-template-columns: 1fr; } .controls { position: static; } }
+  .h2row { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 8px; }
+  .h2row h2 { margin: 0; }
+  .hero { font-size: 34px; font-weight: 800; font-variant-numeric: tabular-nums; margin: 2px 0 0; }
+  .sum { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 14px; }
+  .sum > div { background: var(--card2); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+  .sum .v { font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .sum .l { font-size: 12px; color: var(--mut); text-transform: uppercase; letter-spacing: .5px; }
+  @media (max-width: 520px) { .sum { grid-template-columns: 1fr; } }
+  .legend { display: flex; gap: 14px; font-size: 12px; color: var(--mut); }
+  .legend i, .mixlbl i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+  #chart { display: block; width: 100%; height: auto; }
+  tr.sel td { background: var(--card2); font-weight: 700; }
+  .mix { display: flex; height: 12px; border-radius: 6px; overflow: hidden; background: var(--line); margin: 6px 0 10px; }
+  .mix span { display: block; height: 100%; }
+  .mixlbl { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 13px; }
+  .fine { text-align: center; max-width: 760px; margin: 8px auto 0; }
+</style>
 </head>
 <body>
-  <main>
-    <nav class="topnav" aria-label="Site">
-      <a href="/">Dashboard</a>
-      <a href="/forecast" class="on">Forecast calculator</a>
-    </nav>
-    <section class="intro" aria-labelledby="page-heading">
-      <h1 id="page-heading">Model the road ahead.</h1>
-      <p>Enter today’s portfolio value, a weekly addition, and an annual growth assumption. The forecast compounds weekly across eight practical time horizons.</p>
-    </section>
+<div class="wrap">
+  <div class="top">
+    <h1><img src="/favicon.svg" alt="">Crypto Bot</h1>
+    <span class="status"><span class="dot" id="dot"></span><span id="stext">…</span></span>
+  </div>
+  <nav>
+    <a href="/">Dashboard</a>
+    <a href="/forecast" class="on">Forecast calculator</a>
+  </nav>
 
-    <div class="workspace">
-      <aside class="panel controls" aria-labelledby="assumptions-title">
-        <h2 class="section-title" id="assumptions-title">Forecast assumptions</h2>
-        <div class="field">
-          <div class="field-top"><label for="starting-value">Current value</label><span class="hint">USD</span></div>
-          <div class="money-input"><span aria-hidden="true">$</span><input id="starting-value" type="number" min="0" max="100000000" step="100" inputmode="decimal" value="256" aria-describedby="current-note" /></div>
-          <div class="hint" id="current-note" style="margin-top:7px">Use your current total account value.</div>
+  <div class="fc">
+    <div class="card controls">
+      <h2>Assumptions</h2>
+      <div class="field">
+        <label for="start">Current value (USD)</label>
+        <input id="start" type="number" min="0" step="1" inputmode="decimal" placeholder="loading…">
+        <div class="note" id="start-note">Reading the account value…</div>
+        <button class="linkish" id="use-account" type="button" hidden></button>
+      </div>
+      <div class="field">
+        <label for="weekly">Added every week (USD)</label>
+        <input id="weekly" type="number" min="0" step="5" inputmode="decimal" value="50">
+      </div>
+      <div class="field">
+        <label for="rate">Annual growth (%), not guaranteed</label>
+        <input id="rate" type="number" min="-90" max="200" step="0.5" inputmode="decimal" value="15">
+        <input id="rate-range" type="range" min="-20" max="60" step="1" value="15" aria-label="Annual growth">
+        <div class="seg" style="margin-top:10px">
+          <button type="button" class="preset" data-rate="5">5%</button>
+          <button type="button" class="preset" data-rate="10">10%</button>
+          <button type="button" class="preset" data-rate="15">15%</button>
+          <button type="button" class="preset" data-rate="20">20%</button>
+          <button type="button" class="preset" data-rate="25">25%</button>
         </div>
-        <div class="field">
-          <div class="field-top"><label for="weekly-contribution">Added every week</label><span class="hint">USD</span></div>
-          <div class="money-input"><span aria-hidden="true">$</span><input id="weekly-contribution" type="number" min="0" max="1000000" step="10" inputmode="decimal" value="50" /></div>
+      </div>
+      <button class="linkish" id="reset" type="button">Reset assumptions</button>
+    </div>
+
+    <div>
+      <div class="card">
+        <div class="h2row">
+          <h2 id="hero-label">In 10 years</h2>
+          <div class="seg" aria-label="Horizon">
+            <button type="button" class="yr" data-years="10">10y</button>
+            <button type="button" class="yr" data-years="15">15y</button>
+            <button type="button" class="yr" data-years="20">20y</button>
+            <button type="button" class="yr" data-years="25">25y</button>
+            <button type="button" class="yr" data-years="30">30y</button>
+          </div>
         </div>
-        <div class="field">
-          <div class="field-top"><label for="annual-return">Projected annual growth</label><span class="hint">Not guaranteed</span></div>
-          <div class="percent-input"><input id="annual-return" type="number" min="-90" max="200" step="0.5" inputmode="decimal" value="20" /><span aria-hidden="true">%</span></div>
-          <input id="return-range" type="range" min="-20" max="60" step="1" value="20" aria-label="Projected annual growth slider" />
-          <div class="range-labels"><span>−20%</span><span>20%</span><span>60%</span></div>
-          <div class="presets" aria-label="Return presets">
-            <button class="preset" type="button" data-return="5">5%</button><button class="preset" type="button" data-return="10">10%</button><button class="preset active" type="button" data-return="20">20%</button><button class="preset" type="button" data-return="25">25%</button>
-          </div>
+        <div class="hero" id="hero-value">$–</div>
+        <div class="sum">
+          <div><div class="v" id="sum-start">$–</div><div class="l">Starting value</div></div>
+          <div><div class="v" id="sum-added">$–</div><div class="l">Weekly additions</div></div>
+          <div><div class="v" id="sum-growth">$–</div><div class="l">Growth</div></div>
         </div>
-        <button class="reset" id="reset-button" type="button">Reset assumptions</button>
-      </aside>
+      </div>
 
-      <div class="results" aria-live="polite">
-        <section class="panel outlook" aria-labelledby="outlook-title">
-          <div class="outlook-header">
-            <div><p class="kicker" id="outlook-title">10-year projection</p><p class="hero-number" id="ten-year-value">$0</p></div>
-            <span class="gain-pill" id="growth-pill">+$0 growth</span>
-          </div>
-          <div class="summary-grid">
-            <div class="summary-item"><span>Starting value</span><strong id="summary-start">$0</strong></div>
-            <div class="summary-item"><span>Weekly additions</span><strong id="summary-added">$0</strong></div>
-            <div class="summary-item"><span>Projected growth</span><strong id="summary-growth">$0</strong></div>
-          </div>
-        </section>
+      <div class="card">
+        <div class="h2row">
+          <h2>Value by year</h2>
+          <div class="legend"><span><i style="background:var(--acc)"></i>Put in</span><span><i style="background:var(--grn)"></i>Growth</span></div>
+        </div>
+        <svg id="chart" role="img" aria-label="Projected value at the end of each year"></svg>
+      </div>
 
-        <section class="chart-wrap" aria-labelledby="chart-title">
-          <div class="chart-head">
-            <h2 id="chart-title">Value over time</h2>
-            <div class="legend" aria-label="Chart legend"><span><i class="dot"></i>Contributed</span><span><i class="dot growth"></i>Growth</span></div>
-          </div>
-          <svg id="forecast-chart" role="img" aria-label="Projected portfolio value by time horizon"></svg>
-          <p class="chart-note">Bars separate the money put in from the modeled investment growth.</p>
-        </section>
+      <div class="card">
+        <h2>Milestones</h2>
+        <table>
+          <thead><tr><th>Horizon</th><th class="n">Projected value</th><th class="n">Put in</th><th class="n">Growth</th></tr></thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
 
-        <section class="panel milestones" aria-labelledby="milestones-title">
-          <h2 id="milestones-title">Milestones</h2>
-          <div class="table-head" aria-hidden="true"><span>Horizon</span><span style="text-align:right">Projected value</span><span style="text-align:right">Contributed</span><span style="text-align:right">Growth</span></div>
-          <div id="milestone-rows"></div>
-        </section>
-
-        <section class="strategy" aria-labelledby="strategy-title">
-          <div class="strategy-head">
-            <div><h2 id="strategy-title">Current strategy mix</h2><p>Allocation targets used by the six-asset regime bot.</p></div>
-            <p>93% invested · 7% cash</p>
-          </div>
-          <div class="allocation-bar" aria-label="BTC 44%, ETH 22%, SOL 12%, LINK 5%, XRP 5%, INJ 5%, cash 7%">
-            <span style="width:44%;background:#f7931a"></span><span style="width:22%;background:#627eea"></span><span style="width:12%;background:#14b8a6"></span><span style="width:5%;background:#2a5ada"></span><span style="width:5%;background:#2d8cde"></span><span style="width:5%;background:#8b5cf6"></span><span style="width:7%;background:#83918a"></span>
-          </div>
-          <div class="alloc-grid"><span>BTC<strong>44%</strong></span><span>ETH<strong>22%</strong></span><span>SOL<strong>12%</strong></span><span>LINK<strong>5%</strong></span><span>XRP<strong>5%</strong></span><span>INJ<strong>5%</strong></span><span>Cash<strong>7%</strong></span></div>
-        </section>
+      <div class="card">
+        <h2>Strategy mix</h2>
+        <div class="mix" id="mix"></div>
+        <div class="mixlbl" id="mixlbl"></div>
+        <p class="note" id="mixnote"></p>
       </div>
     </div>
-    <p class="fineprint">A planning model, not a prediction or financial advice. It assumes a constant annual return, weekly compounding, and contributions made at the end of each week. It does not include taxes, trading fees, slippage, withdrawals, or changes in allocation.</p>
-  </main>
+  </div>
+  <p class="note fine">A planning model, not a prediction or financial advice. It assumes a constant annual
+  return, weekly compounding and additions at the end of each week, and leaves out taxes, trading fees,
+  slippage, withdrawals and changes in allocation.</p>
+</div>
+<script>
+(function () {
+  "use strict";
+  var $ = function (id) { return document.getElementById(id); };
+  var start = $("start"), weekly = $("weekly"), rate = $("rate"), range = $("rate-range");
+  var money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
+  var compact = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 });
+  var WEEKS = 52;
+  var MILESTONES = [["6 months", 0.5], ["1 year", 1], ["2 years", 2], ["3 years", 3], ["5 years", 5],
+    ["10 years", 10], ["15 years", 15], ["20 years", 20], ["25 years", 25], ["30 years", 30]];
+  var DEFAULTS = { weekly: 50, rate: 15, years: 10 };
+  var COLORS = { XBT: "#f7931a", ETH: "#627eea", SOL: "#14b8a6", LINK: "#2a5ada", XRP: "#23a3dd", INJ: "#8b5cf6" };
+  // The bull-market targets, shown until the bot's own answer arrives.
+  var POLICY = { pairs: [["XBTUSD", 44], ["ETHUSD", 22], ["SOLUSD", 12], ["LINKUSD", 5], ["XRPUSD", 5], ["INJUSD", 5]]
+    .map(function (p) { return { pair: p[0], target_pct: p[1] }; }), cash_target_pct: 7 };
+  var years = DEFAULTS.years, account = null, edited = false, reached = false;
 
-  <script>
-    (function () {
-      "use strict";
-      var startInput = document.getElementById("starting-value");
-      var weeklyInput = document.getElementById("weekly-contribution");
-      var returnInput = document.getElementById("annual-return");
-      var returnRange = document.getElementById("return-range");
-      var rows = document.getElementById("milestone-rows");
-      var chart = document.getElementById("forecast-chart");
-      var presets = Array.prototype.slice.call(document.querySelectorAll(".preset"));
-      var horizons = [
-        { label: "1 month", weeks: 4 }, { label: "3 months", weeks: 13 }, { label: "6 months", weeks: 26 },
-        { label: "1 year", weeks: 52 }, { label: "2 years", weeks: 104 }, { label: "3 years", weeks: 156 },
-        { label: "5 years", weeks: 260 }, { label: "10 years", weeks: 520 }
-      ];
-      var currency = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
-      var compact = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 });
-      function valueOf(input, fallback) { var n = parseFloat(input.value); return Number.isFinite(n) ? n : fallback; }
-      function futureValue(principal, weekly, annualPercent, weeks) {
-        var annual = annualPercent / 100;
-        var weeklyRate = Math.pow(1 + annual, 1 / 52) - 1;
-        var principalValue = principal * Math.pow(1 + weeklyRate, weeks);
-        var additionsValue = weeklyRate === 0 ? weekly * weeks : weekly * ((Math.pow(1 + weeklyRate, weeks) - 1) / weeklyRate);
-        return principalValue + additionsValue;
+  // A remembered horizon, weekly amount and rate: per-browser, optional.
+  function load() {
+    try {
+      var saved = JSON.parse(localStorage.getItem("forecast") || "{}");
+      if (saved.weekly != null) weekly.value = saved.weekly;
+      if (saved.rate != null) rate.value = saved.rate;
+      if ([10, 15, 20, 25, 30].indexOf(saved.years) >= 0) years = saved.years;
+    } catch (e) { /* storage blocked: defaults */ }
+  }
+  function save() {
+    try { localStorage.setItem("forecast", JSON.stringify({ weekly: weekly.value, rate: rate.value, years: years })); }
+    catch (e) { /* storage blocked */ }
+  }
+
+  function num(input, fallback) { var n = parseFloat(input.value); return isFinite(n) ? n : fallback; }
+
+  // Weekly compounding at the rate equivalent to `annualPercent` a year, with
+  // `perWeek` added at the end of every week.
+  function futureValue(principal, perWeek, annualPercent, weeks) {
+    var r = Math.pow(1 + annualPercent / 100, 1 / WEEKS) - 1;
+    var grown = principal * Math.pow(1 + r, weeks);
+    var added = r === 0 ? perWeek * weeks : perWeek * (Math.pow(1 + r, weeks) - 1) / r;
+    return grown + added;
+  }
+  function at(yrs, p, w, a) {
+    var weeks = Math.round(yrs * WEEKS), total = futureValue(p, w, a, weeks), put = p + w * weeks;
+    return { year: yrs, total: total, put: put, growth: total - put };
+  }
+  function signed(n) { return (n < 0 ? "−" : "+") + money.format(Math.abs(n)); }
+
+  function svg(name, attrs, text) {
+    var el = document.createElementNS("http://www.w3.org/2000/svg", name);
+    Object.keys(attrs || {}).forEach(function (k) { el.setAttribute(k, attrs[k]); });
+    if (text !== undefined) el.textContent = text;
+    return el;
+  }
+  function drawChart(points) {
+    var chart = $("chart");
+    while (chart.firstChild) chart.removeChild(chart.firstChild);
+    // Drawn at the width it is shown at, so the labels stay readable on a phone.
+    var W = Math.max(280, Math.round(chart.getBoundingClientRect().width) || 640), H = Math.max(200, Math.round(W * 0.38));
+    var m = { t: 10, r: 6, b: 24, l: 54 }, pw = W - m.l - m.r, ph = H - m.t - m.b;
+    var max = Math.max.apply(null, points.map(function (d) { return d.total; }).concat([1]));
+    var step = Math.pow(10, Math.floor(Math.log10(max))), top = Math.ceil(max / step) * step;
+    chart.setAttribute("viewBox", "0 0 " + W + " " + H);
+    for (var i = 0; i <= 4; i++) {
+      var y = m.t + ph - ph * i / 4;
+      chart.appendChild(svg("line", { x1: m.l, x2: W - m.r, y1: y, y2: y, stroke: "var(--line)" }));
+      chart.appendChild(svg("text", { x: m.l - 8, y: y + 4, "text-anchor": "end", fill: "var(--mut)", "font-size": "11" },
+        "$" + compact.format(top * i / 4)));
+    }
+    var slot = pw / points.length, bw = Math.max(3, Math.min(30, slot * 0.7)), base = m.t + ph;
+    points.forEach(function (d, idx) {
+      var x = m.l + slot * idx + (slot - bw) / 2;
+      var putH = Math.min(d.put, d.total) / top * ph, growH = Math.max(0, d.growth) / top * ph;
+      var g = svg("g");
+      g.appendChild(svg("title", {}, "Year " + d.year + ": " + money.format(d.total) + " (put in " +
+        money.format(d.put) + ", growth " + signed(d.growth) + ")"));
+      g.appendChild(svg("rect", { x: x, y: base - putH, width: bw, height: putH, fill: "var(--acc)" }));
+      if (growH > 0) g.appendChild(svg("rect", { x: x, y: base - putH - growH, width: bw, height: growH, fill: "var(--grn)" }));
+      chart.appendChild(g);
+      if (d.year === 1 || d.year % 5 === 0) {
+        chart.appendChild(svg("text", { x: x + bw / 2, y: H - 6, "text-anchor": "middle", fill: "var(--mut)", "font-size": "11" },
+          d.year + "y"));
       }
-      function svgEl(name, attrs, text) {
-        var el = document.createElementNS("http://www.w3.org/2000/svg", name);
-        Object.keys(attrs || {}).forEach(function (key) { el.setAttribute(key, attrs[key]); });
-        if (text !== undefined) el.textContent = text;
-        return el;
-      }
-      function drawChart(data) {
-        while (chart.firstChild) chart.removeChild(chart.firstChild);
-        var width = 700, height = 285, margin = { top: 20, right: 12, bottom: 40, left: 56 };
-        var plotW = width - margin.left - margin.right, plotH = height - margin.top - margin.bottom;
-        var max = Math.max.apply(null, data.map(function (d) { return d.total; }).concat([1]));
-        var roundedMax = Math.pow(10, Math.floor(Math.log10(max)));
-        roundedMax = Math.ceil(max / roundedMax) * roundedMax;
-        chart.setAttribute("viewBox", "0 0 " + width + " " + height);
-        for (var i = 0; i <= 4; i++) {
-          var y = margin.top + plotH - (plotH * i / 4), tick = roundedMax * i / 4;
-          chart.appendChild(svgEl("line", { x1: margin.left, x2: width - margin.right, y1: y, y2: y, stroke: "var(--line)", "stroke-width": "1" }));
-          chart.appendChild(svgEl("text", { x: margin.left - 9, y: y + 4, "text-anchor": "end", fill: "var(--muted)", "font-size": "10", "font-family": "IBM Plex Mono, monospace" }, "$" + compact.format(tick)));
-        }
-        var slot = plotW / data.length, barW = Math.min(46, slot * .55);
-        data.forEach(function (d, idx) {
-          var x = margin.left + slot * idx + (slot - barW) / 2;
-          var contributedH = Math.max(0, d.contributed / roundedMax * plotH), growthH = Math.max(0, d.growth / roundedMax * plotH), lossH = Math.max(0, -d.growth / roundedMax * plotH), baseY = margin.top + plotH;
-          if (d.growth >= 0) {
-            chart.appendChild(svgEl("rect", { x: x, y: baseY - contributedH, width: barW, height: contributedH, rx: "3", fill: "var(--blue)" }));
-            chart.appendChild(svgEl("rect", { x: x, y: baseY - contributedH - growthH, width: barW, height: growthH, rx: "3", fill: "var(--accent)" }));
-          } else {
-            var totalH = Math.max(0, d.total / roundedMax * plotH);
-            chart.appendChild(svgEl("rect", { x: x, y: baseY - totalH, width: barW, height: totalH, rx: "3", fill: "var(--blue)" }));
-            chart.appendChild(svgEl("line", { x1: x, x2: x + barW, y1: baseY - totalH - Math.min(lossH, 5), y2: baseY - totalH - Math.min(lossH, 5), stroke: "var(--accent)", "stroke-width": "4" }));
-          }
-          chart.appendChild(svgEl("text", { x: x + barW / 2, y: height - 16, "text-anchor": "middle", fill: "var(--muted)", "font-size": "10", "font-family": "Libre Franklin, sans-serif" }, d.short));
-        });
-      }
-      function render() {
-        var principal = Math.max(0, valueOf(startInput, 0)), weekly = Math.max(0, valueOf(weeklyInput, 0)), annual = Math.max(-90, Math.min(200, valueOf(returnInput, 0)));
-        if (annual >= -20 && annual <= 60) returnRange.value = annual;
-        presets.forEach(function (button) { button.classList.toggle("active", parseFloat(button.dataset.return) === annual); });
-        var data = horizons.map(function (h) {
-          var total = futureValue(principal, weekly, annual, h.weeks), contributed = principal + weekly * h.weeks;
-          return { label: h.label, short: h.label.replace(" months", " mo").replace(" month", " mo").replace(" years", " yr").replace(" year", " yr"), total: total, contributed: contributed, growth: total - contributed };
-        });
-        var ten = data[data.length - 1];
-        document.getElementById("ten-year-value").textContent = currency.format(ten.total);
-        document.getElementById("growth-pill").textContent = (ten.growth >= 0 ? "+" : "−") + currency.format(Math.abs(ten.growth)) + " growth";
-        document.getElementById("summary-start").textContent = currency.format(principal);
-        document.getElementById("summary-added").textContent = currency.format(weekly * 520);
-        document.getElementById("summary-growth").textContent = (ten.growth < 0 ? "−" : "") + currency.format(Math.abs(ten.growth));
-        rows.innerHTML = "";
-        data.forEach(function (d) {
-          var row = document.createElement("div"); row.className = "milestone-row";
-          row.innerHTML = '<span class="when">' + d.label + '</span><span class="amount">' + currency.format(d.total) + '</span><span class="contributed">' + currency.format(d.contributed) + '</span><span class="growth-value">' + (d.growth < 0 ? "−" : "+") + currency.format(Math.abs(d.growth)) + '</span>';
-          rows.appendChild(row);
-        });
-        drawChart(data);
-      }
-      [startInput, weeklyInput, returnInput].forEach(function (input) { input.addEventListener("input", render); });
-      returnRange.addEventListener("input", function () { returnInput.value = returnRange.value; render(); });
-      presets.forEach(function (button) { button.addEventListener("click", function () { returnInput.value = button.dataset.return; returnRange.value = button.dataset.return; render(); }); });
-      document.getElementById("reset-button").addEventListener("click", function () { startInput.value = 256; weeklyInput.value = 50; returnInput.value = 15; returnRange.value = 15; render(); });
-      render();
-    }());
-  </script>
+    });
+  }
+
+  function mark(selector, on) {
+    Array.prototype.forEach.call(document.querySelectorAll(selector), function (b) { b.classList.toggle("on", on(b)); });
+  }
+  function render() {
+    var p = Math.max(0, num(start, 0)), w = Math.max(0, num(weekly, 0));
+    var a = Math.max(-90, Math.min(200, num(rate, 0)));
+    if (a >= -20 && a <= 60) range.value = a;
+    mark(".preset", function (b) { return parseFloat(b.dataset.rate) === a; });
+    mark(".yr", function (b) { return parseInt(b.dataset.years, 10) === years; });
+    var hero = at(years, p, w, a);
+    $("hero-label").textContent = "In " + years + " years";
+    $("hero-value").textContent = money.format(hero.total);
+    $("sum-start").textContent = money.format(p);
+    $("sum-added").textContent = money.format(hero.put - p);
+    $("sum-growth").textContent = signed(hero.growth);
+    var rows = $("rows");
+    rows.innerHTML = "";
+    MILESTONES.forEach(function (ms) {
+      var d = at(ms[1], p, w, a), tr = document.createElement("tr");
+      if (ms[1] === years) tr.className = "sel";
+      tr.innerHTML = "<td>" + ms[0] + "</td><td class=\"n\">" + money.format(d.total) + "</td><td class=\"n\">" +
+        money.format(d.put) + "</td><td class=\"n " + (d.growth < 0 ? "neg" : "pos") + "\">" + signed(d.growth) + "</td>";
+      rows.appendChild(tr);
+    });
+    var points = [];
+    for (var y = 1; y <= years; y++) points.push(at(y, p, w, a));
+    drawChart(points);
+    save();
+  }
+
+  function drawMix(s) {
+    var parts = s.pairs.filter(function (p) { return p.target_pct > 0; }).map(function (p) {
+      var code = p.pair.replace("USD", "");
+      return { name: code === "XBT" ? "BTC" : code, pct: p.target_pct, color: COLORS[code] || "var(--acc)" };
+    });
+    if (!parts.length) return;
+    parts.push({ name: "Cash", pct: s.cash_target_pct, color: "var(--mut)" });
+    var bar = $("mix"), lbl = $("mixlbl"), invested = 0;
+    var pct = function (x) { return Math.round(x * 10) / 10 + "%"; };
+    bar.innerHTML = "";
+    lbl.innerHTML = "";
+    parts.forEach(function (p) {
+      if (p.name !== "Cash") invested += p.pct;
+      var seg = document.createElement("span");
+      seg.style.width = p.pct + "%";
+      seg.style.background = p.color;
+      seg.title = p.name + " " + pct(p.pct);
+      bar.appendChild(seg);
+      var item = document.createElement("span");
+      item.innerHTML = "<i style=\"background:" + p.color + "\"></i>" + p.name + " <b>" + pct(p.pct) + "</b>";
+      lbl.appendChild(item);
+    });
+    $("mixnote").textContent = pct(invested) + " invested, " + pct(s.cash_target_pct) + " cash" +
+      (s === POLICY ? ": the bull-market targets." : ", as the bot targets it today.") +
+      " A coin in a bear regime targets half its share; the rest waits in cash.";
+  }
+
+  // The account's value: live from Kraken, else the bot's last daily snapshot.
+  function describe() {
+    var note = $("start-note"), again = $("use-account");
+    again.hidden = !(edited && account);
+    if (account) again.textContent = "Use the account value (" + money.format(account.value) + ")";
+    if (edited) note.textContent = "Your own value.";
+    else if (account && account.live) note.textContent = "Live Kraken balance.";
+    else if (account) note.textContent = "Kraken unreachable: last known balance, " + account.date + ".";
+    else if (reached) note.textContent = "No Kraken connection and no saved balance yet: enter a value.";
+    else note.textContent = "Could not reach the bot: enter a value.";
+  }
+  function useAccount() {
+    if (!account) return;
+    edited = false;
+    start.value = Math.round(account.value * 100) / 100;
+    render();
+    describe();
+  }
+  async function loadAccount() {
+    var s = null;
+    try { s = await (await fetch("/api/status")).json(); } catch (e) { s = null; }
+    if (s) {
+      reached = true;
+      $("dot").className = "dot " + (s.running ? "on" : "off");
+      $("stext").textContent = s.running ? "Running" : "Stopped";
+      if (s.kraken_ok) account = { value: s.total_usd, live: true };
+      else if (s.last_known_total_usd != null) account = { value: s.last_known_total_usd, live: false, date: s.last_known_date };
+      else account = null;
+      drawMix(s);
+    }
+    if (account && !edited) useAccount();
+    else describe();
+  }
+
+  start.addEventListener("input", function () { edited = true; describe(); render(); });
+  [weekly, rate].forEach(function (input) { input.addEventListener("input", render); });
+  range.addEventListener("input", function () { rate.value = range.value; render(); });
+  Array.prototype.forEach.call(document.querySelectorAll(".preset"), function (b) {
+    b.addEventListener("click", function () { rate.value = b.dataset.rate; render(); });
+  });
+  Array.prototype.forEach.call(document.querySelectorAll(".yr"), function (b) {
+    b.addEventListener("click", function () { years = parseInt(b.dataset.years, 10); render(); });
+  });
+  $("use-account").addEventListener("click", useAccount);
+  $("reset").addEventListener("click", function () {
+    weekly.value = DEFAULTS.weekly;
+    rate.value = DEFAULTS.rate;
+    years = DEFAULTS.years;
+    if (account) useAccount(); else render();
+  });
+
+  var resized = null;
+  window.addEventListener("resize", function () { clearTimeout(resized); resized = setTimeout(render, 150); });
+
+  load();
+  drawMix(POLICY);
+  render();
+  loadAccount();
+  setInterval(loadAccount, 60000);
+}());
+</script>
 </body>
 </html>

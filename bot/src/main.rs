@@ -94,10 +94,11 @@ Default is paper. Live and rebalance refuse to run without the exact confirm
 string. Discord: set CRYPTO_DISCORD_WEBHOOK_URL for daily (15:00 UTC), weekly (Mon),
 monthly (1st).
 
-Policy (alloc.rs): one account, target weights BTC 50% / ETH 25% / SOL 15% /
-cash 10% of the TOTAL, scaled by the daily regime rule (regime.rs) on every
-coin. A coin trades only on its own regime flip, the one-time move onto this
-policy, a deposit being invested, or `rebalance` — never on ordinary drift.
+Policy (alloc.rs): one account, base weights BTC 44% / ETH 22% / SOL 12% /
+LINK, XRP, INJ 5% each / cash 7% of the TOTAL. The daily regime rule
+(regime.rs) halves a coin's weight in a bear; cash takes the rest. A coin
+trades only on its own regime flip, a move onto a new policy, a deposit being
+invested, or `rebalance` — never on ordinary drift.
 "
     );
     std::process::exit(2);

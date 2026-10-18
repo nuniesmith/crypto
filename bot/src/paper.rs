@@ -36,7 +36,7 @@ use crate::ledger::{Execution, LiveLedger, Sleeve, Totals};
 //
 // This is not a rounding matter. A maker round trip costs 0.80%, not 0.46% --
 // the move a signal must beat before it earns anything nearly doubles. The
-// Python research (src/crypto/sim/fees.py) already models tier 1 as exactly
+// Python research (src/crypto/sim/fees.py, tag python-research-final) models tier 1 as exactly
 // (0.0040, 0.0080) and its verdict at that tier is blunt: "Retail taker
 // (tier 1) is a dead end: 0/7 default combos were +EV in-sample."
 //

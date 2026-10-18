@@ -7,7 +7,7 @@
 //! sizing all three coins rather than two of them against a frozen BTC
 //! pile — so `PAIRS` below grew to include `XBTUSD`.
 //!
-//! `src/crypto/opt/regime.py` compared standard, untuned rules on Binance daily
+//! `src/crypto/opt/regime.py` (tag `python-research-final`) compared standard, untuned rules on Binance daily
 //! data (ETH from 2018, SOL from 2021) at Kraken tier-1 fees, over the whole
 //! history and each half separately. The one chosen was the most consistent,
 //! not the best-fitting:
@@ -71,8 +71,8 @@ impl Reading {
 /// then it only changes on a close beyond the buffer. With Kraken's 720 daily
 /// candles that leaves 520 days of walk, far more than it takes to settle
 /// into the same state a longer history would give. It is the same machine
-/// as `sma200_band` in `src/crypto/opt/regime.py`, so the study and the bot
-/// cannot disagree.
+/// as `sma200_band` in `src/crypto/opt/regime.py` (tag `python-research-final`),
+/// so the study's verdict is about this code.
 ///
 /// `None` until there are `SMA_DAYS` closes.
 pub fn evaluate(closes: &[f64]) -> Option<Reading> {

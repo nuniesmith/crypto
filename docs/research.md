@@ -107,6 +107,9 @@ The 60d holdout was a bounce: PUMP +112%, NEAR +85%, AVAX +54% **buy-and-hold**.
 
 ## How to re-run
 
+> The Python this cites (`src/crypto/`) left `main` on 2026-10-17 and runs unchanged from the tag
+> `python-research-final`: see [research-code.md](research-code.md).
+
 ```bash
 .venv/bin/crypto fetch-history --pair XBTUSD ETHUSD SOLUSD --days 400
 .venv/bin/crypto fetch-history --pair XRPUSD AVAXUSD --days 400 --interval 15

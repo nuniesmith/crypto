@@ -16,7 +16,7 @@
 //! once the three coins' effective targets are subtracted — 10% when every
 //! coin is bull, up to 55% when all three are bear.
 //!
-//! `src/crypto/opt/portfolio.py` (branch `research/swing-tranches`) simulated
+//! `src/crypto/opt/portfolio.py` (Python, tag `python-research-final`) simulated
 //! this account against a 5/25-rebalanced version of the same targets and a
 //! buy-and-hold of the same split. The trend rule trading only on a flip beat
 //! both: the 5/25 rebalancer added roughly 30 trades a year trimming ordinary

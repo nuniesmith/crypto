@@ -6,8 +6,8 @@ description = "Live Kraken bot — exchange-apiws + rustrade"
 publish = false
 
 [dependencies]
-# Published crates (nuniesmith). Path overrides stay in [patch] for local work.
-exchange-apiws = { git = "https://github.com/nuniesmith/exchange-apiws", rev = "50874dc274f54bbb3b35aa27a3e5ed9a3d3ec6e9", default-features = false, features = ["kraken"] }
+# Published crates (nuniesmith), from crates.io. Path overrides go in [patch] for local work.
+exchange-apiws = { version = "0.12", default-features = false, features = ["kraken"] }
 rustrade-framework = "0.5.2"
 async-trait = "0.1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signal", "process", "net"] }

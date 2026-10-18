@@ -26,6 +26,7 @@ mod brains;
 mod discord;
 mod features;
 mod foreign;
+mod forward;
 mod kraken_src;
 mod ledger;
 mod live;
@@ -89,6 +90,10 @@ Usage:
   crypto-bot rebalance --confirm I_UNDERSTAND_REAL_MONEY
                                 mark every coin pending so the next work tick
                                 brings the account to its effective targets
+  crypto-bot forward [--actual [STATE.json]] [--start YYYY-MM-DD]
+                                the forward test frozen on 2026-10-16: public
+                                candles only, safe beside the loop. --actual adds
+                                the real account; --start is a mechanics check
 
 Default is paper. Live and rebalance refuse to run without the exact confirm
 string. Discord: set CRYPTO_DISCORD_WEBHOOK_URL for daily (15:00 UTC), weekly (Mon),
@@ -127,6 +132,7 @@ async fn main() -> anyhow::Result<()> {
         "paper" => run(Mode::Paper, args.iter().any(|a| a == "--loop")).await,
         "status" => status_cmd().await,
         "report" => report_cmd().await,
+        "forward" => forward_cmd(&args).await,
         "live" => {
             if dry {
                 run(Mode::LiveDry, args.iter().any(|a| a == "--loop")).await
@@ -166,6 +172,46 @@ async fn main() -> anyhow::Result<()> {
         }
         _ => usage(),
     }
+}
+
+/// The forward test frozen on 2026-10-16 (`forward.rs`). It reads public
+/// candles and, with `--actual`, a state file, so it is safe beside the loop.
+async fn forward_cmd(args: &[String]) -> anyhow::Result<()> {
+    let client = KrakenRestClient::new().map_err(|e| anyhow::anyhow!("{e}"))?;
+    let panel = forward::kraken_panel(&client).await?;
+    let frozen = forward::forward_start();
+    let start = match args.windows(2).find(|w| w[0] == "--start") {
+        Some(w) => {
+            let s = chrono::NaiveDate::parse_from_str(&w[1], "%Y-%m-%d")
+                .map_err(|e| anyhow::anyhow!("--start {}: {e}", w[1]))?;
+            println!(
+                "NOTE: --start {s} overrides the pre-registered {frozen}; not a forward result"
+            );
+            s
+        }
+        None => frozen,
+    };
+    let Some(text) = forward::report(&panel, start) else {
+        let last = panel
+            .days
+            .last()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        println!("The forward test starts {start}; Kraken's last closed day is {last}. Nothing to score yet.");
+        return Ok(());
+    };
+    println!("{text}");
+    if let Some(i) = args.iter().position(|a| a == "--actual") {
+        let state = match args.get(i + 1).filter(|a| !a.starts_with("--")) {
+            Some(path) => serde_json::from_str::<paper::State>(&std::fs::read_to_string(path)?)?,
+            None => load_state()?,
+        };
+        match forward::actual(&panel, &state, start) {
+            Some(line) => println!("{line}"),
+            None => println!("Actual account: fewer than two daily snapshots since {start}."),
+        }
+    }
+    Ok(())
 }
 
 /// Marks every coin pending, so the next work tick brings the whole account

@@ -15,7 +15,7 @@ use tracing::{info, warn};
 
 use crate::live::AccountSnapshot;
 use crate::paper::{fmt_ts, FlowKind, State};
-use crate::regime;
+use crate::{forward, regime};
 
 pub fn webhook_url() -> Option<String> {
     std::env::var("CRYPTO_DISCORD_WEBHOOK_URL")
@@ -344,6 +344,46 @@ pub fn build_embed(
     }
 }
 
+const FORWARD_BLUE: u32 = 0x3498DB;
+
+/// The forward test (`forward.rs`) as its own message after each monthly
+/// report. It reads public candles only, and a failure costs this message,
+/// never the report.
+async fn send_forward_test(state: &State) {
+    let text = match forward_text(state).await {
+        Ok(Some(text)) => text,
+        Ok(None) => return,
+        Err(e) => {
+            warn!("forward test not sent: {e:#}");
+            return;
+        }
+    };
+    let embed = serde_json::json!({
+        "title": "Forward test (frozen 2026-10-16)",
+        "description": format!("```\n{text}\n```"),
+        "color": FORWARD_BLUE,
+        "timestamp": Utc::now().to_rfc3339(),
+    });
+    match send_embed(&embed).await {
+        Ok(()) => info!("discord forward test sent"),
+        Err(e) => warn!("discord forward test failed: {e:#}"),
+    }
+}
+
+async fn forward_text(state: &State) -> anyhow::Result<Option<String>> {
+    let client = exchange_apiws::KrakenRestClient::new().map_err(|e| anyhow::anyhow!("{e}"))?;
+    let panel = forward::kraken_panel(&client).await?;
+    let start = forward::forward_start();
+    let Some(mut text) = forward::report(&panel, start) else {
+        return Ok(None);
+    };
+    if let Some(line) = forward::actual(&panel, state, start) {
+        text.push('\n');
+        text.push_str(&line);
+    }
+    Ok(Some(text))
+}
+
 pub fn due_kinds(state: &State, force: Option<&str>) -> Vec<String> {
     let now = Utc::now();
     let today = now.format("%Y-%m-%d").to_string();
@@ -395,6 +435,9 @@ pub async fn send_kinds(state: &mut State, kinds: &[String], account: Option<&Ac
                     "monthly" => state.last_monthly = month.clone(),
                     "startup" => {}
                     _ => {}
+                }
+                if kind == "monthly" {
+                    send_forward_test(state).await;
                 }
             }
             Err(e) => warn!("discord {kind} failed: {e:#}"),

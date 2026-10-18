@@ -74,6 +74,7 @@ crypto-bot live --dry-run                        real wallet read, no orders (pr
 crypto-bot rebalance --dry-run | --confirm I_UNDERSTAND_REAL_MONEY
 crypto-bot status | report                       account summary / Discord snapshot now (private API too)
 crypto-bot paper [--loop]                        paper bookkeeping only
+crypto-bot forward [--actual [STATE.json]]       the forward test frozen 2026-10-16 (public candles: safe beside the loop)
 ```
 
 Live and rebalance refuse to run without the exact confirm string.

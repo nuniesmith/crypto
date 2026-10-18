@@ -24,6 +24,7 @@ mod alloc;
 mod discord;
 mod foreign;
 mod forward;
+mod guard;
 mod ledger;
 mod live;
 mod minimums;
@@ -1117,6 +1118,9 @@ async fn deposit_top_up_pair(
         );
         return true;
     }
+    if !guard_allows(state, mode, w, m, &r, now, events).await {
+        return true; // still wanted: the deposit stays pending
+    }
     if let Some(order) = place_rebalance(mode, live_gw, &r, Purpose::DepositBuy, now, events).await
     {
         state.pending_orders.push(order);
@@ -1201,6 +1205,9 @@ async fn close_one_gap(
                     if r.side > 0 { "buy" } else { "sell" },
                     r.qty
                 );
+                return;
+            }
+            if !guard_allows(state, mode, w, m, &r, now, events).await {
                 return;
             }
             if let Some(order) =
@@ -1368,6 +1375,44 @@ fn new_client_order_id() -> String {
     h2.write_u64(n ^ 0x9E37_79B9_7F4A_7C15);
     h2.write_u64(nanos.rotate_left(17));
     format!("{:016x}{:016x}", h1.finish(), h2.finish())
+}
+
+/// The sanity cap (`guard.rs`) on one coin order. A refusal places nothing,
+/// is logged every time, and in live mode alerts Discord once per UTC day.
+async fn guard_allows(
+    state: &mut paper::State,
+    mode: Mode,
+    w: &alloc::Wallet,
+    m: alloc::Marks,
+    r: &alloc::Rebalance,
+    now: i64,
+    events: &mut Vec<String>,
+) -> bool {
+    let notional = r.qty * r.price;
+    let total = alloc::total_usd(w, m);
+    let Err(refusal) = guard::check(r.side, notional, total, guard::traded_today(state, m, now))
+    else {
+        return true;
+    };
+    let side = if r.side > 0 { "buy" } else { "sell" };
+    let msg = format!("REFUSED {side} {} ${notional:.2}: {refusal}", r.pair);
+    warn!("{msg}");
+    events.push(msg.clone());
+    let today = chrono::DateTime::from_timestamp(now, 0)
+        .map(|t| t.date_naive().to_string())
+        .unwrap_or_default();
+    if matches!(mode, Mode::Live) && state.guard_alerted_day != today {
+        state.guard_alerted_day = today;
+        discord::alert(
+            "Order refused by the sanity cap",
+            &format!(
+                "{msg}\n\nNo order was placed. The gap is retried every tick: the day's cap \
+                 resets at 00:00 UTC, and an oversized buy stays refused until it is fixed."
+            ),
+        )
+        .await;
+    }
+    false
 }
 
 /// Place one post-only order for a `Rebalance` the policy wants, logging it
@@ -2693,6 +2738,83 @@ mod work_tick_tests {
         assert_eq!(
             s.flows[0].asset, "XRP",
             "still recorded under its own code, not silently lost"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_full_trading_day_refuses_the_next_order() {
+        let mut s = paper::State::default_paper();
+        s.policy_version = 2;
+        let m = marks();
+        let w = alloc::Wallet {
+            usd: 1000.0,
+            ..alloc::Wallet::default()
+        };
+        let now = 1_792_195_200 + 12 * 3600; // 2026-10-17 12:00 UTC
+                                             // Twice the account already traded today.
+        s.live.fills = vec![ledger::Fill {
+            txid: "T1".into(),
+            ts: now - 3600,
+            pair: "ETHUSD".into(),
+            side: 1,
+            sleeve: ledger::Sleeve::Hold,
+            book: None,
+            qty: 0.74,
+            cost: 2000.0,
+            fee: 0.0,
+        }];
+        let mut events = Vec::new();
+        let mut spendable = w.usd_available();
+        close_one_gap(
+            &mut s,
+            Mode::LiveDry,
+            None,
+            &w,
+            m,
+            touch_at(m.btc),
+            "XBTUSD",
+            true,
+            alloc::Policy::LIVE,
+            &mut spendable,
+            now,
+            &mut events,
+        )
+        .await;
+        assert!(
+            events.iter().any(|e| e.starts_with("REFUSED buy XBTUSD")),
+            "{events:?}"
+        );
+        assert!(
+            !events.iter().any(|e| e.contains("WOULD PLACE")),
+            "{events:?}"
+        );
+        assert!(s.pending_orders.is_empty());
+        assert!(
+            s.guard_alerted_day.is_empty(),
+            "a dry run never alerts Discord"
+        );
+
+        // The next UTC day starts with a clean slate.
+        let mut next_events = Vec::new();
+        let mut spendable = w.usd_available();
+        close_one_gap(
+            &mut s,
+            Mode::LiveDry,
+            None,
+            &w,
+            m,
+            touch_at(m.btc),
+            "XBTUSD",
+            true,
+            alloc::Policy::LIVE,
+            &mut spendable,
+            now + 86_400,
+            &mut next_events,
+        )
+        .await;
+        assert!(
+            next_events.iter().any(|e| e.contains("WOULD PLACE")),
+            "{next_events:?}"
         );
     }
 }

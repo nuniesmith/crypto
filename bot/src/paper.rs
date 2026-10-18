@@ -208,6 +208,10 @@ pub struct State {
     /// (`foreign.rs`): when the watch began and what it has alerted on.
     #[serde(default)]
     pub foreign_watch: crate::foreign::ForeignWatch,
+    /// UTC date `YYYY-MM-DD` the sanity cap (`guard.rs`) last alerted on
+    /// Discord, so a refused order is reported once a day, not every tick.
+    #[serde(default)]
+    pub guard_alerted_day: String,
     /// UTC hour (`%Y-%m-%dT%H`) the work tick last ran. Replaces the 1h-bar
     /// trigger: order SETTLEMENT still runs every wake (see `main.rs`), but
     /// deciding what to trade runs once per UTC hour and once on startup.
@@ -322,6 +326,7 @@ impl State {
             last_history_day: String::new(),
             last_work_hour: String::new(),
             foreign_watch: Default::default(),
+            guard_alerted_day: String::new(),
         }
     }
 }

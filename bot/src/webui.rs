@@ -3,7 +3,9 @@
 //! `crypto-bot webui [--port 8090]` starts an HTTP server with:
 //! - a live dashboard (regime per pair, targets vs holdings, P&L),
 //! - start/stop controls for the trading loop (managed as a child process),
-//! - the forecast calculator.
+//! - the forecast calculator, starting from the account's value.
+//!
+//! Both pages share `/app.css` and the `/favicon.svg` bitcoin icon.
 //!
 //! The dashboard reads `state.json` for regime flags. Balances come from the
 //! trading loop's snapshot while the loop runs (`paper::BalanceSnapshot`), so
@@ -25,8 +27,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::extract::State;
-use axum::http::StatusCode;
-use axum::response::{Html, Json};
+use axum::http::{header, StatusCode};
+use axum::response::{Html, IntoResponse, Json};
 use axum::routing::{get, post};
 use exchange_apiws::KrakenRestClient;
 use serde::Serialize;
@@ -184,6 +186,16 @@ struct StatusResponse {
     cash_target_pct: f64,
     pairs: Vec<PairStatus>,
     kraken_ok: bool,
+    /// The account total at the trading loop's last daily snapshot, and that
+    /// snapshot's date: what the forecast starts from while Kraken is
+    /// unreachable (`kraken_ok` false, every live figure 0).
+    last_known_total_usd: Option<f64>,
+    last_known_date: Option<String>,
+}
+
+/// The newest daily snapshot's (total, date), if the loop has written one.
+fn last_known(history: &[paper::DailySnapshot]) -> Option<(f64, String)> {
+    history.last().map(|d| (d.total_usd, d.date.clone()))
 }
 
 /// Kraken asset code -> our pair name. `None` means cash/unknown.
@@ -321,10 +333,10 @@ async fn api_status(State(state): State<Arc<WebState>>) -> (StatusCode, Json<Sta
         slot.sup.healthy(running, quiet)
     };
 
-    // Regime flags from state.json (always available).
-    let regime_bull: BTreeMap<String, bool> = paper::load_state()
-        .map(|s| s.regime_bull)
-        .unwrap_or_default();
+    // Regime flags and the last daily total from state.json (always available).
+    let saved = paper::load_state().ok();
+    let last = saved.as_ref().and_then(|s| last_known(&s.history));
+    let regime_bull: BTreeMap<String, bool> = saved.map(|s| s.regime_bull).unwrap_or_default();
 
     let cash_target_pct = alloc::cash_weight(&regime_bull).unwrap_or(0.0) * 100.0;
 
@@ -391,6 +403,8 @@ async fn api_status(State(state): State<Arc<WebState>>) -> (StatusCode, Json<Sta
             cash_target_pct,
             pairs,
             kraken_ok,
+            last_known_total_usd: last.as_ref().map(|(total, _)| *total),
+            last_known_date: last.map(|(_, date)| date),
         }),
     )
 }
@@ -590,6 +604,20 @@ async fn forecast_page() -> Html<&'static str> {
     Html(include_str!("webui/forecast.html"))
 }
 
+async fn stylesheet() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        include_str!("webui/app.css"),
+    )
+}
+
+async fn favicon() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "image/svg+xml")],
+        include_str!("webui/favicon.svg"),
+    )
+}
+
 /// Start the WebUI HTTP server. Runs until killed.
 /// If `autostart` is true, the trading loop is launched immediately.
 pub async fn serve(port: u16, autostart: bool) -> anyhow::Result<()> {
@@ -610,6 +638,8 @@ pub async fn serve(port: u16, autostart: bool) -> anyhow::Result<()> {
     let app = axum::Router::new()
         .route("/", get(dashboard))
         .route("/forecast", get(forecast_page))
+        .route("/app.css", get(stylesheet))
+        .route("/favicon.svg", get(favicon))
         .route("/api/status", get(api_status))
         .route("/api/start", post(api_start))
         .route("/api/stop", post(api_stop))
@@ -744,5 +774,21 @@ mod tests {
     fn waits_read_in_seconds_then_minutes() {
         assert_eq!(human(secs(30)), "30 s");
         assert_eq!(human(secs(960)), "16 min");
+    }
+
+    #[test]
+    fn the_last_known_total_is_the_newest_daily_snapshot() {
+        let day = |date: &str, total_usd: f64| paper::DailySnapshot {
+            date: date.into(),
+            total_usd,
+            qty: BTreeMap::new(),
+            mark: BTreeMap::new(),
+            net_deposits_usd_to_date: 0.0,
+        };
+        assert_eq!(last_known(&[]), None);
+        assert_eq!(
+            last_known(&[day("2026-10-16", 320.5), day("2026-10-17", 332.36)]),
+            Some((332.36, "2026-10-17".to_string()))
+        );
     }
 }

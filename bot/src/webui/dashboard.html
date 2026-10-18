@@ -4,50 +4,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Crypto Bot</title>
-<style>
-  :root{--bg:#0e1116;--card:#171c24;--line:#262d38;--txt:#e8ecf1;--mut:#9aa4b2;
-    --acc:#4da3ff;--grn:#3fd68c;--red:#ff6b6b;--amb:#ffb84d;}
-  *{box-sizing:border-box;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}
-  body{background:var(--bg);color:var(--txt);margin:0;padding:24px 16px 48px;}
-  .wrap{max-width:860px;margin:0 auto;}
-  h1{font-size:22px;margin:0;}
-  .top{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;flex-wrap:wrap;gap:12px;}
-  .status{display:inline-flex;align-items:center;gap:8px;font-size:14px;font-weight:600;
-    padding:8px 16px;border-radius:999px;border:1px solid var(--line);}
-  .dot{width:10px;height:10px;border-radius:50%;}
-  .dot.on{background:var(--grn);box-shadow:0 0 8px var(--grn);}
-  .dot.off{background:var(--red);box-shadow:0 0 8px var(--red);}
-  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px;margin-bottom:16px;}
-  .btn{background:var(--acc);color:#04121f;border:none;border-radius:10px;padding:11px 22px;
-    font-size:15px;font-weight:700;cursor:pointer;}
-  .btn.stop{background:var(--red);color:#1f0404;}
-  .btn:disabled{opacity:.45;cursor:default;}
-  .btnrow{display:flex;gap:10px;}
-  table{width:100%;border-collapse:collapse;font-size:14px;}
-  th{text-align:left;color:var(--mut);font-weight:600;font-size:12px;text-transform:uppercase;
-    letter-spacing:.4px;padding:10px 8px;border-bottom:1px solid var(--line);}
-  td{padding:11px 8px;border-bottom:1px solid var(--line);font-variant-numeric:tabular-nums;}
-  tr:last-child td{border-bottom:none;}
-  td.n,th.n{text-align:right;}
-  .bull{color:var(--grn);font-weight:700;}
-  .bear{color:var(--amb);font-weight:700;}
-  .kpi{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:16px;}
-  @media(max-width:640px){.kpi{grid-template-columns:1fr;}}
-  .kpi .card{margin:0;text-align:center;}
-  .kpi .v{font-size:26px;font-weight:800;font-variant-numeric:tabular-nums;}
-  .kpi .l{font-size:12px;color:var(--mut);text-transform:uppercase;letter-spacing:.5px;margin-top:4px;}
-  nav{display:flex;gap:8px;margin-bottom:16px;}
-  nav a{color:var(--txt);text-decoration:none;font-size:14px;padding:8px 16px;border-radius:999px;
-    border:1px solid var(--line);}
-  nav a.on{border-color:var(--acc);color:var(--acc);}
-  .note{font-size:12px;color:var(--mut);}
-  .err{color:var(--red);font-size:13px;margin-top:8px;min-height:18px;}
-</style>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/app.css">
 </head>
 <body>
 <div class="wrap">
   <div class="top">
-    <h1>Crypto Bot</h1>
+    <h1><img src="/favicon.svg" alt="">Crypto Bot</h1>
     <span class="status"><span class="dot off" id="dot"></span><span id="stext">Stopped</span></span>
   </div>
   <nav>
@@ -56,7 +19,7 @@
   </nav>
 
   <div class="kpi">
-    <div class="card"><div class="v" id="ktotal">$–</div><div class="l">Total value</div></div>
+    <div class="card"><div class="v" id="ktotal">$–</div><div class="l" id="ltotal">Total value</div></div>
     <div class="card"><div class="v" id="kcash" style="color:var(--acc)">$–</div><div class="l">Cash</div></div>
     <div class="card"><div class="v" id="kkraken" style="color:var(--mut)">–</div><div class="l">Kraken link</div></div>
   </div>
@@ -85,22 +48,28 @@ const fmt$=n=>'$'+Math.round(n).toLocaleString('en-US');
 async function refresh(){
   try{
     const r=await fetch('/api/status'); const s=await r.json();
+    if($('err').textContent==='status fetch failed') $('err').textContent='';
     $('dot').className='dot '+(s.running?'on':'off');
     $('stext').textContent=s.running?'Running':'Stopped';
     $('bstart').disabled=s.running; $('bstop').disabled=!s.running;
-    $('ktotal').textContent=fmt$(s.total_usd);
-    $('kcash').textContent=fmt$(s.cash_usd)+'  ('+s.cash_target_pct.toFixed(1)+'% tgt)';
-    $('kkraken').textContent=s.kraken_ok?'connected':'no keys';
+    // Without Kraken every live figure is 0: show the last daily snapshot instead.
+    const stale=!s.kraken_ok&&s.last_known_total_usd!=null;
+    $('ktotal').textContent=fmt$(stale?s.last_known_total_usd:s.total_usd);
+    $('ltotal').textContent=stale?'Total value (last known, '+s.last_known_date+')':'Total value';
+    const live=n=>s.kraken_ok?fmt$(n):'$–';
+    $('kcash').textContent=live(s.cash_usd)+'  ('+s.cash_target_pct.toFixed(1)+'% tgt)';
+    $('kkraken').textContent=s.kraken_ok?'connected':'not connected';
     $('kkraken').style.color=s.kraken_ok?'var(--grn)':'var(--mut)';
     const tb=$('rows'); tb.innerHTML='';
     s.pairs.forEach(p=>{
       const tr=document.createElement('tr');
       const reg=p.bull==null?'<span class="note">—</span>':
         p.bull?'<span class="bull">BULL</span>':'<span class="bear">BEAR</span>';
-      tr.innerHTML='<td><b>'+p.pair.replace('USD','')+'</b></td><td>'+reg+'</td>'+
+      const coin=p.pair.replace('USD','').replace(/^XBT$/,'BTC');
+      tr.innerHTML='<td><b>'+coin+'</b></td><td>'+reg+'</td>'+
         '<td class="n">'+p.target_pct.toFixed(1)+'%</td>'+
-        '<td class="n">'+fmt$(p.holding_usd)+'</td>'+
-        '<td class="n">'+p.holding_pct.toFixed(1)+'%</td>';
+        '<td class="n">'+live(p.holding_usd)+'</td>'+
+        '<td class="n">'+(s.kraken_ok?p.holding_pct.toFixed(1)+'%':'–')+'</td>';
       tb.appendChild(tr);
     });
   }catch(e){ $('err').textContent='status fetch failed'; }

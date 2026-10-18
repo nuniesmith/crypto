@@ -2,12 +2,13 @@
 name = "crypto-bot"
 version = "0.1.0"
 edition = "2021"
-description = "Live Kraken bot — exchange-apiws + rustrade"
+description = "Live Kraken bot — exchange-apiws + indicators-ta + rustrade"
 publish = false
 
 [dependencies]
 # Published crates (nuniesmith), from crates.io. Path overrides go in [patch] for local work.
 exchange-apiws = { version = "0.12", default-features = false, features = ["kraken"] }
+indicators-ta = "0.3.1"
 rustrade-framework = "0.5.2"
 async-trait = "0.1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "signal", "process", "net"] }

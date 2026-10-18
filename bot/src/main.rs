@@ -1,9 +1,10 @@
 //! Paper (default) / live-gated Kraken bot.
 //!
-//! Crates: `exchange-apiws` (Kraken) and `rustrade-framework` (`live.rs`
-//! implements its `ExchangeClient` for Kraken). The 1h signal books' modules
-//! (`brains`, `signal`, `features`, `paper_ex`, `kraken_src`), never wired
-//! into the live path, were deleted on 2026-10-18 with `indicators-ta`.
+//! Crates: `exchange-apiws` (Kraken), `indicators-ta` (the 200-day band
+//! behind `regime.rs`) and `rustrade-framework` (`live.rs` implements its
+//! `ExchangeClient` for Kraken). The 1h signal books' modules (`brains`,
+//! `signal`, `features`, `paper_ex`, `kraken_src`), never wired into the live
+//! path, were deleted on 2026-10-18.
 //!
 //! Live wallet, since 2026-10-05: ONE account targeting BTC/ETH/SOL/cash of
 //! its TOTAL value, with the trend rule (`regime.rs`) sizing all three
@@ -67,7 +68,7 @@ fn load_dotenv() {
 fn usage() -> ! {
     eprintln!(
         "crypto-bot — Kraken paper/live
-  exchange-apiws + rustrade
+  exchange-apiws + indicators-ta + rustrade
 
 Usage:
   crypto-bot paper              one cycle (paper bookkeeping only)

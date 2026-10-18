@@ -70,39 +70,33 @@ impl Reading {
 /// the first day the average exists, the state is the plain above/below test,
 /// then it only changes on a close beyond the buffer. With Kraken's 720 daily
 /// candles that leaves 520 days of walk, far more than it takes to settle
-/// into the same state a longer history would give. It is the same machine
-/// as `sma200_band` in `src/crypto/opt/regime.py` (tag `python-research-final`),
+/// into the same state a longer history would give.
+///
+/// The rule itself is indicators-ta's `sma_band` (since 2026-10-18), the one
+/// definition the bot, Janus and research share. It was hand-written here
+/// before, and `forward.rs`'s tests still check it day by day against
+/// `sma200_band` in `src/crypto/opt/regime.py` (tag `python-research-final`),
 /// so the study's verdict is about this code.
 ///
 /// `None` until there are `SMA_DAYS` closes.
 pub fn evaluate(closes: &[f64]) -> Option<Reading> {
-    if closes.len() < SMA_DAYS {
-        return None;
-    }
-    let n = SMA_DAYS as f64;
-    let mut sum: f64 = closes[..SMA_DAYS].iter().sum();
-    let mut bull: Option<bool> = None;
-    let mut last = None;
-    for i in (SMA_DAYS - 1)..closes.len() {
-        if i >= SMA_DAYS {
-            sum += closes[i] - closes[i - SMA_DAYS];
-        }
-        let sma = sum / n;
-        let close = closes[i];
-        let state = match bull {
-            None => close > sma,
-            Some(_) if close > sma * (1.0 + BAND) => true,
-            Some(_) if close < sma * (1.0 - BAND) => false,
-            Some(s) => s,
-        };
-        bull = Some(state);
-        last = Some(Reading {
-            close,
-            sma,
-            bull: state,
-        });
-    }
-    last
+    series(closes).pop().flatten()
+}
+
+/// The regime on EVERY one of `closes` in one pass: what [`evaluate`]
+/// returns for each prefix.
+pub fn series(closes: &[f64]) -> Vec<Option<Reading>> {
+    indicators::sma_band(closes, SMA_DAYS, BAND)
+        .expect("SMA_DAYS and BAND are valid band parameters")
+        .into_iter()
+        .map(|r| {
+            r.map(|b| Reading {
+                close: b.close,
+                sma: b.sma,
+                bull: b.bull,
+            })
+        })
+        .collect()
 }
 
 /// The share of a coin's sleeve to hold in this regime.

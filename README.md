@@ -99,7 +99,7 @@ scripts/                 run-bot.sh for a local build; the retired systemd units
 ```
 
 Crates (nuniesmith): [`exchange-apiws`](https://github.com/nuniesmith/exchange-apiws)
-0.12 (Kraken REST) and `rustrade-framework` 0.5.2 (`live.rs` implements its `ExchangeClient` for Kraken).
+0.12 (Kraken REST), [`indicators-ta`](https://github.com/nuniesmith/indicators-ta) 0.3.1 (`sma_band`, the 200-day rule behind `regime.rs`) and `rustrade-framework` 0.5.2 (`live.rs` implements its `ExchangeClient` for Kraken).
 
 ## Research
 

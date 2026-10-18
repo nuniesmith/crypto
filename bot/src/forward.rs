@@ -169,8 +169,11 @@ impl Panel {
             let closes: Vec<f64> = close.iter().map(|row| row[j]).collect();
             // Only leading days can be NaN: a price, once seen, is carried.
             let from = closes.iter().position(|c| !c.is_nan()).unwrap_or(n);
-            for d in (from + 1)..n {
-                bull[d][j] = regime::evaluate(&closes[from..d]).map(|r| r.bull);
+            // The reading on one day's close decides the next day.
+            for (offset, reading) in regime::series(&closes[from..]).iter().enumerate() {
+                if let Some(row) = bull.get_mut(from + offset + 1) {
+                    row[j] = reading.map(|r| r.bull);
+                }
             }
         }
         Some(Panel {

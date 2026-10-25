@@ -21,6 +21,11 @@
 //! healthcheck curls `/api/status`, so either way it turns unhealthy rather
 //! than passing over a bot that is not trading. Until 2026-10-17 a dead loop
 //! was noticed by nothing: the status answered 200 with `running: false`.
+//!
+//! When `BOT_STATUS_PORT` is set, `serve` also starts the FKS status
+//! server (`crate::status`) on that port, in this same process and over
+//! this same state, so FKS can read the bot's `/status` document. Unset,
+//! that server does not exist and nothing here changes.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -43,6 +48,10 @@ use crate::{alloc, discord, live, paper, regime};
 pub struct WebState {
     bot: Mutex<LoopSlot>,
     holdings_cache: Mutex<Option<(Instant, CachedHoldings)>>,
+    /// When `serve` built this state. The FKS status document's
+    /// `uptime_secs` counts from here: the webui process's own uptime,
+    /// which is also the status server's.
+    pub(crate) started: Instant,
 }
 
 /// The trading-loop process, if one was started, and what the watchdog knows
@@ -54,10 +63,16 @@ struct LoopSlot {
 }
 
 #[derive(Clone, Default)]
-struct CachedHoldings {
-    holdings_usd: BTreeMap<&'static str, f64>,
-    cash_usd: f64,
-    kraken_ok: bool,
+pub(crate) struct CachedHoldings {
+    pub(crate) holdings_usd: BTreeMap<&'static str, f64>,
+    /// Coins held per pair, and the mark each holding was valued at. The
+    /// dashboard only needs the dollar value, but the FKS status document
+    /// reports qty and price per holding, so `fetch_holdings` keeps them
+    /// from the same balances and marks — no extra Kraken call.
+    pub(crate) qty: BTreeMap<&'static str, f64>,
+    pub(crate) price: BTreeMap<&'static str, f64>,
+    pub(crate) cash_usd: f64,
+    pub(crate) kraken_ok: bool,
 }
 
 const HOLDINGS_TTL: Duration = Duration::from_secs(120);
@@ -318,11 +333,36 @@ async fn fetch_holdings(loop_running: bool) -> CachedHoldings {
         } else if let Some(pair) = pair_for_asset(code) {
             if let Some(px) = marks.get(pair) {
                 *out.holdings_usd.entry(pair).or_insert(0.0) += qty * px;
+                *out.qty.entry(pair).or_insert(0.0) += *qty;
+                out.price.insert(pair, *px);
             }
         }
     }
     out.kraken_ok = true;
     out
+}
+
+/// The holdings both HTTP surfaces read: the 2-minute cache while it is
+/// fresh, otherwise a `fetch_holdings` refresh that refills it. The FKS
+/// status server (`crate::status`) reads through this too, so the
+/// dashboard and the status document always show the same numbers, and
+/// the cache stays the only Kraken touch either of them makes.
+pub(crate) async fn holdings_snapshot(state: &Arc<WebState>) -> CachedHoldings {
+    let cached = {
+        let guard = state.holdings_cache.lock().await;
+        guard
+            .clone()
+            .filter(|(at, _)| at.elapsed() < HOLDINGS_TTL)
+            .map(|(_, c)| c)
+    };
+    match cached {
+        Some(c) => c,
+        None => {
+            let fresh = fetch_holdings(bot_running(state).await).await;
+            *state.holdings_cache.lock().await = Some((Instant::now(), fresh.clone()));
+            fresh
+        }
+    }
 }
 
 async fn api_status(State(state): State<Arc<WebState>>) -> (StatusCode, Json<StatusResponse>) {
@@ -341,21 +381,7 @@ async fn api_status(State(state): State<Arc<WebState>>) -> (StatusCode, Json<Sta
     let cash_target_pct = alloc::cash_weight(&regime_bull).unwrap_or(0.0) * 100.0;
 
     // Holdings from Kraken (best-effort, cached 2 min — Kraken rate-limits).
-    let cached = {
-        let guard = state.holdings_cache.lock().await;
-        guard
-            .clone()
-            .filter(|(at, _)| at.elapsed() < HOLDINGS_TTL)
-            .map(|(_, c)| c)
-    };
-    let holdings = match cached {
-        Some(c) => c,
-        None => {
-            let fresh = fetch_holdings(running).await;
-            *state.holdings_cache.lock().await = Some((Instant::now(), fresh.clone()));
-            fresh
-        }
-    };
+    let holdings = holdings_snapshot(&state).await;
     let holdings_usd = holdings.holdings_usd;
     let cash_usd = holdings.cash_usd;
     let kraken_ok = holdings.kraken_ok;
@@ -624,6 +650,7 @@ pub async fn serve(port: u16, autostart: bool) -> anyhow::Result<()> {
     let state = Arc::new(WebState {
         bot: Mutex::new(LoopSlot::default()),
         holdings_cache: Mutex::new(None),
+        started: Instant::now(),
     });
     if autostart && !bot_running(&state).await {
         info!("webui: autostart enabled — launching trading loop");
@@ -635,6 +662,23 @@ pub async fn serve(port: u16, autostart: bool) -> anyhow::Result<()> {
         }
     }
     tokio::spawn(watchdog(state.clone()));
+    // The FKS status server is opt-in: with `BOT_STATUS_PORT` unset (or not
+    // a port number) it does not exist, and this process serves only the
+    // dashboard, exactly as before.
+    if let Ok(raw) = std::env::var("BOT_STATUS_PORT") {
+        match raw.trim().parse::<u16>() {
+            Ok(status_port) => {
+                info!("webui: BOT_STATUS_PORT={status_port} — starting the FKS status server");
+                tokio::spawn(crate::status::serve(state.clone(), status_port));
+            }
+            Err(_) => {
+                warn!(
+                    "webui: BOT_STATUS_PORT={raw:?} is not a port number; \
+                     the FKS status server stays off"
+                );
+            }
+        }
+    }
     let app = axum::Router::new()
         .route("/", get(dashboard))
         .route("/forecast", get(forecast_page))

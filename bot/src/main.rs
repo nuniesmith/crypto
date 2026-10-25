@@ -31,6 +31,7 @@ mod live;
 mod minimums;
 mod paper;
 mod regime;
+mod status;
 mod webui;
 
 use paper::{append_journal, load_state, print_status, save_state};

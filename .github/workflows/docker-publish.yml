@@ -41,7 +41,14 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/nuniesmith/crypto
+          # The fks-bot-crypto alias is the same image under the FKS
+          # platform naming: the spawner image allowlist admits only
+          # ghcr.io/nuniesmith/fks-bot-* (oryx#16), so the managed
+          # crypto-regime bot runs the alias while the standalone keeps
+          # pulling :crypto. No secrets are baked in either way.
+          images: |
+            ghcr.io/nuniesmith/crypto
+            ghcr.io/nuniesmith/fks-bot-crypto
           tags: |
             type=raw,value=latest
             type=sha,prefix=sha-
